@@ -892,6 +892,12 @@ def delete_product(product_id: int, db: Session = Depends(get_db)):
     item = db.get(Product, product_id)
     if not item:
         raise HTTPException(status_code=404, detail="Produto nao encontrado")
+    linked_price_table = db.scalar(select(PriceTableItem).where(PriceTableItem.product_id == product_id))
+    if linked_price_table:
+        raise HTTPException(status_code=400, detail="Produto vinculado a tabela de preco. Remova o item da tabela antes de excluir o produto.")
+    linked_order = db.scalar(select(SalesOrderItem).where(SalesOrderItem.product_id == product_id))
+    if linked_order:
+        raise HTTPException(status_code=400, detail="Produto vinculado a pedidos. Inative o produto para impedir novas vendas.")
     db.delete(item)
     db.commit()
     return {"ok": True}
