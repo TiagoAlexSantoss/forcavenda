@@ -96,7 +96,7 @@ class CustomerRead(BaseModel):
 
 
 class CustomerBase(BaseModel):
-    customer_profile_id: int | None = None
+    customer_profile_id: int
     name: str
     document_number: str | None = None
     email: str | None = None
@@ -141,7 +141,7 @@ class CustomerProfileRead(CustomerProfileBase):
 
 
 class CustomerProfileAssign(BaseModel):
-    customer_profile_id: int | None = None
+    customer_profile_id: int
 
 
 class PriceTableBase(BaseModel):

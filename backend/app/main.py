@@ -138,7 +138,7 @@ def seed_customer_profiles():
 
 def get_profile_or_404(db: Session, profile_id: int | None) -> CustomerProfile | None:
     if not profile_id:
-        return None
+        raise HTTPException(status_code=400, detail="Informe o perfil comercial do cliente")
     item = db.get(CustomerProfile, profile_id)
     if not item:
         raise HTTPException(status_code=404, detail="Perfil comercial nao encontrado")

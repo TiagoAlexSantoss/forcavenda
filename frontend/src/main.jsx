@@ -19,6 +19,28 @@ const emptyPriceItem = { product_id: "", base_price: "0.00", active: true };
 const emptyOrder = { customer_id: "", price_table_id: "", order_date: today, payment_due_date: today, notes: "" };
 const emptyOrderItem = { product_id: "", quantity: "1" };
 
+const MESSAGE_TYPES = {
+  error: "error",
+  success: "success",
+};
+
+const MESSAGES = {
+  apiUnavailable: "Nao foi possivel conectar na API do Forca de Vendas.",
+  operationFailed: "Nao foi possivel concluir a operacao.",
+  operationSuccess: "Operacao concluida com sucesso.",
+  customers: {
+    profileRequired: "Informe o perfil comercial do cliente.",
+  },
+};
+
+function createMessage(type, text) {
+  return { type, text };
+}
+
+function errorMessage(error, fallback = MESSAGES.operationFailed) {
+  return createMessage(MESSAGE_TYPES.error, error?.response?.data?.detail || error?.message || fallback);
+}
+
 function App() {
   const [activeTab, setActiveTab] = useState("products");
   const [health, setHealth] = useState(null);
@@ -57,7 +79,7 @@ function App() {
       setOrders(ordersRes.data);
       setMessage(null);
     } catch (error) {
-      setMessage(error.response?.data?.detail || "Nao foi possivel conectar na API do Forca de Vendas.");
+      setMessage(errorMessage(error, MESSAGES.apiUnavailable));
     }
   }
 
@@ -69,10 +91,12 @@ function App() {
   async function run(action) {
     try {
       await action();
-      setMessage(null);
       await loadAll();
+      setMessage(createMessage(MESSAGE_TYPES.success, MESSAGES.operationSuccess));
+      return true;
     } catch (error) {
-      setMessage(error.response?.data?.detail || "Nao foi possivel concluir a operacao.");
+      setMessage(errorMessage(error));
+      return false;
     }
   }
 
@@ -109,7 +133,7 @@ function App() {
           <button className="secondary-button" onClick={loadAll}><RefreshCcw size={17} /> Atualizar</button>
         </header>
 
-        {message && <div className="message">{message}</div>}
+        {message && <div className={`message ${message.type}`}>{message.text}</div>}
 
         {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} run={run} />}
         {activeTab === "priceTables" && <PriceTablesBrowser priceTables={priceTables} products={products} run={run} />}
@@ -480,8 +504,11 @@ function CustomersBrowser({ customers, customerProfiles, run }) {
   async function save(form, item) {
     const payload = { ...form, customer_profile_id: form.customer_profile_id ? Number(form.customer_profile_id) : null, name: form.name.trim(), document_number: form.document_number || null, email: form.email || null, phone: form.phone || null, city: form.city || null, state_code: form.state_code || null };
     const id = item ? localId(item) : null;
-    await run(() => id ? api.put(`/customers/${id}`, payload) : api.post("/customers", payload));
-    setModal(null);
+    const saved = await run(() => {
+      if (!payload.customer_profile_id) throw new Error(MESSAGES.customers.profileRequired);
+      return id ? api.put(`/customers/${id}`, payload) : api.post("/customers", payload);
+    });
+    if (saved) setModal(null);
   }
 
   return (
@@ -513,13 +540,16 @@ function CustomerModal({ state, setState, customerProfiles, onSave, run }) {
   const isShared = item?.id?.startsWith("easyfinance:");
   async function saveSharedProfile() {
     const [source, externalId] = item.id.split(":");
-    await run(() => api.put(`/customers/${source}/${externalId}/profile`, { customer_profile_id: form.customer_profile_id ? Number(form.customer_profile_id) : null }));
-    setState(null);
+    const saved = await run(() => {
+      if (!form.customer_profile_id) throw new Error(MESSAGES.customers.profileRequired);
+      return api.put(`/customers/${source}/${externalId}/profile`, { customer_profile_id: Number(form.customer_profile_id) });
+    });
+    if (saved) setState(null);
   }
   return (
     <Modal title={item ? "Editar cliente" : "Novo cliente"} onClose={() => setState(null)} onSubmit={() => isShared ? saveSharedProfile() : onSave(form, item)}>
       <div className="modal-grid">
-        <Field label="Perfil comercial" wide><Select value={form.customer_profile_id} onChange={(v) => update("customer_profile_id", v)} options={customerProfiles} empty="Sem perfil" /></Field>
+        <Field label="Perfil comercial" wide><Select required value={form.customer_profile_id} onChange={(v) => update("customer_profile_id", v)} options={customerProfiles} empty="Selecione" /></Field>
         {isShared && <Field label="Limite de credito"><input disabled value={money.format(Number(item.credit_limit || 0))} /></Field>}
         <Field label="Nome" wide><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
         <Field label="CPF/CNPJ"><input value={form.document_number} onChange={(e) => update("document_number", e.target.value)} /></Field>

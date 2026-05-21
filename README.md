@@ -51,7 +51,7 @@ O fluxo atual tem duas etapas:
 
 O limite de credito pertence ao cadastro de pessoas do EasyFinance (`people.credit_limit`) e e apenas consultado pelo Forca de Vendas. Valores pagos, em aberto e titulos vencidos ficam no EasyFinance; o Forca usa esses dados somente para decidir a aprovacao, sem exibir o detalhe financeiro na tela.
 
-O cadastro **Perfis comerciais** classifica clientes como Novo, Bom, Excelente, Ruim, Inativo ou outros perfis cadastrados. Cada perfil define:
+O cadastro **Perfis comerciais** classifica clientes como Novo, Bom, Excelente, Ruim, Inativo ou outros perfis cadastrados. Todo cliente usado pelo Forca de Vendas deve ter um perfil comercial informado. Cada perfil define:
 
 - Dias maximos sem movimentacao.
 - Dias tolerados para titulos vencidos.
