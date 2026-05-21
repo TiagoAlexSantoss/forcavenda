@@ -45,6 +45,7 @@ from app.schemas import (
     ProductRead,
     ProductUpdate,
     SalesOrderCreate,
+    SalesOrderItemCancel,
     SalesOrderItemCreate,
     SalesOrderRead,
     SalesOrderUpdate,
@@ -99,6 +100,17 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS total_cost_amount NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS gross_profit_amount NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS profitability_percent NUMERIC(10, 4) NOT NULL DEFAULT 0"))
+        connection.execute(text("ALTER TABLE sf_price_table_items ADD COLUMN IF NOT EXISTS margin_percent NUMERIC(10, 4) NOT NULL DEFAULT 5"))
+        connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS cancelled_quantity NUMERIC(14, 4) NOT NULL DEFAULT 0"))
+        connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS negotiated_unit_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
+        connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS price_margin_percent NUMERIC(10, 4) NOT NULL DEFAULT 5"))
+        connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS min_unit_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
+        connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS max_unit_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
+        connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS commercial_status VARCHAR(30) NOT NULL DEFAULT 'approved'"))
+        connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS cancellation_status VARCHAR(30) NOT NULL DEFAULT 'active'"))
+        connection.execute(text("UPDATE sf_sales_order_items SET negotiated_unit_price = corrected_unit_price WHERE negotiated_unit_price = 0"))
+        connection.execute(text("UPDATE sf_sales_order_items SET min_unit_price = ROUND(corrected_unit_price * 0.95, 2) WHERE min_unit_price = 0"))
+        connection.execute(text("UPDATE sf_sales_order_items SET max_unit_price = ROUND(corrected_unit_price * 1.05, 2) WHERE max_unit_price = 0"))
     seed_customer_profiles()
 
 
@@ -254,6 +266,7 @@ def price_table_item_to_read(db: Session, item: PriceTableItem) -> dict:
         "product_sku": product.sku if product else None,
         "product_name": product.name if product else None,
         "base_price": item.base_price,
+        "margin_percent": item.margin_percent,
         "active": item.active,
     }
 
@@ -271,6 +284,41 @@ def correction_factor(table: PriceTable, payment_due_date: date) -> Decimal:
 
 def corrected_price(table: PriceTable, base_price: Decimal, payment_due_date: date) -> Decimal:
     return money_round(Decimal(str(base_price)) * correction_factor(table, payment_due_date))
+
+
+def margin_bounds(unit_price: Decimal, margin_percent: Decimal) -> tuple[Decimal, Decimal]:
+    margin = Decimal(str(margin_percent or 0)) / Decimal("100")
+    return (
+        money_round(Decimal(str(unit_price)) * (Decimal("1") - margin)),
+        money_round(Decimal(str(unit_price)) * (Decimal("1") + margin)),
+    )
+
+
+def commercial_status_for_price(unit_price: Decimal, min_price: Decimal, max_price: Decimal) -> str:
+    unit_price = Decimal(str(unit_price or 0))
+    if unit_price < Decimal(str(min_price or 0)) or unit_price > Decimal(str(max_price or 0)):
+        return "pending"
+    return "approved"
+
+
+def effective_quantity(item: SalesOrderItem) -> Decimal:
+    value = Decimal(str(item.quantity or 0)) - Decimal(str(item.cancelled_quantity or 0))
+    return max(value, Decimal("0"))
+
+
+def recalculate_order_item(item: SalesOrderItem):
+    qty = effective_quantity(item)
+    unit_price = Decimal(str(item.negotiated_unit_price or item.corrected_unit_price or 0))
+    item.total_amount = money_round(qty * unit_price)
+    item.total_cost_amount = money_round(qty * Decimal(str(item.cost_unit_price or 0)))
+    item.gross_profit_amount = money_round(item.total_amount - item.total_cost_amount)
+    item.profitability_percent = profitability_percent(item.total_amount, item.gross_profit_amount)
+    if qty <= 0:
+        item.cancellation_status = "cancelled"
+    elif Decimal(str(item.cancelled_quantity or 0)) > 0:
+        item.cancellation_status = "partial"
+    else:
+        item.cancellation_status = "active"
 
 
 def resolve_customer(db: Session, customer_id: str) -> dict:
@@ -333,10 +381,17 @@ def order_to_read(db: Session, order: SalesOrder) -> dict:
 def recalculate_order_totals(db: Session, order: SalesOrder):
     db.flush()
     items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all()
+    for item in items:
+        recalculate_order_item(item)
+    db.flush()
     order.total_amount = money_round(sum((Decimal(str(row.total_amount)) for row in items), Decimal("0")))
     order.total_cost_amount = money_round(sum((Decimal(str(row.total_cost_amount)) for row in items), Decimal("0")))
     order.gross_profit_amount = money_round(order.total_amount - order.total_cost_amount)
     order.profitability_percent = weighted_order_profitability(items, order.total_amount)
+    if items and all(effective_quantity(item) <= 0 for item in items):
+        order.status = "cancelled"
+        order.approval_stage = "cancelled"
+        order.approval_notes = "Pedido cancelado integralmente pelos itens."
 
 
 def easyfinance_customer_financial(db: Session, external_id: str) -> dict:
@@ -437,6 +492,29 @@ def evaluate_financial_approval(db: Session, order: SalesOrder) -> tuple[bool, l
     return len(notes) == 0, notes or ["Aprovacao financeira sem restricoes."]
 
 
+def refresh_order_approval_stage(db: Session, order: SalesOrder):
+    if order.status in {"cancelled", "rejected"}:
+        return
+    items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all()
+    active_items = [item for item in items if effective_quantity(item) > 0]
+    if not active_items:
+        order.status = "cancelled"
+        order.approval_stage = "cancelled"
+        order.approval_notes = "Pedido cancelado integralmente pelos itens."
+        return
+    pending = [item for item in active_items if item.commercial_status == "pending"]
+    if pending:
+        order.status = "pending_commercial"
+        order.approval_stage = "commercial"
+        order.approval_notes = "Pedido possui item(ns) fora da margem comercial."
+        return
+    if order.status in {"pending_commercial", "financial_blocked"}:
+        order.status = "approved"
+        order.approval_stage = "approved"
+        order.commercial_approved_at = datetime.utcnow()
+        order.approval_notes = "Itens aprovados comercialmente."
+
+
 def build_order_items(db: Session, order: SalesOrder, table: PriceTable, payload_items, payment_due_date: date):
     for payload_item in payload_items:
         if Decimal(str(payload_item.quantity)) <= 0:
@@ -454,8 +532,10 @@ def build_order_items(db: Session, order: SalesOrder, table: PriceTable, payload
         if not price_item:
             raise HTTPException(status_code=400, detail=f"Produto {product.sku} sem preco ativo na tabela")
         unit_price = corrected_price(table, price_item.base_price, payment_due_date)
-        item_total = money_round(Decimal(str(payload_item.quantity)) * unit_price)
+        negotiated_unit_price = money_round(Decimal(str(payload_item.negotiated_unit_price or unit_price)))
+        min_unit_price, max_unit_price = margin_bounds(unit_price, price_item.margin_percent)
         cost_unit_price = money_round(Decimal(str(product.cost_price or 0)))
+        item_total = money_round(Decimal(str(payload_item.quantity)) * negotiated_unit_price)
         item_total_cost = money_round(Decimal(str(payload_item.quantity)) * cost_unit_price)
         item_profit = money_round(item_total - item_total_cost)
         item_profitability = profitability_percent(item_total, item_profit)
@@ -466,13 +546,20 @@ def build_order_items(db: Session, order: SalesOrder, table: PriceTable, payload
                 product_sku=product.sku,
                 product_name=product.name,
                 quantity=payload_item.quantity,
+                cancelled_quantity=Decimal("0"),
                 base_unit_price=price_item.base_price,
                 corrected_unit_price=unit_price,
+                negotiated_unit_price=negotiated_unit_price,
+                price_margin_percent=price_item.margin_percent,
+                min_unit_price=min_unit_price,
+                max_unit_price=max_unit_price,
                 cost_unit_price=cost_unit_price,
                 total_amount=item_total,
                 total_cost_amount=item_total_cost,
                 gross_profit_amount=item_profit,
                 profitability_percent=item_profitability,
+                commercial_status=commercial_status_for_price(negotiated_unit_price, min_unit_price, max_unit_price),
+                cancellation_status="active",
             )
         )
 
@@ -981,10 +1068,13 @@ def create_price_table_item(price_table_id: int, payload: PriceTableItemCreate, 
         raise HTTPException(status_code=400, detail="Produto ja cadastrado nesta tabela")
     if Decimal(str(payload.base_price)) < 0:
         raise HTTPException(status_code=400, detail="Preco base nao pode ser negativo")
+    if Decimal(str(payload.margin_percent)) < 0:
+        raise HTTPException(status_code=400, detail="Margem nao pode ser negativa")
     item = PriceTableItem(
         price_table_id=price_table_id,
         product_id=payload.product_id,
         base_price=payload.base_price,
+        margin_percent=payload.margin_percent,
         active=payload.active,
     )
     db.add(item)
@@ -1012,8 +1102,11 @@ def update_price_table_item(item_id: int, payload: PriceTableItemUpdate, db: Ses
         raise HTTPException(status_code=400, detail="Produto ja cadastrado nesta tabela")
     if Decimal(str(payload.base_price)) < 0:
         raise HTTPException(status_code=400, detail="Preco base nao pode ser negativo")
+    if Decimal(str(payload.margin_percent)) < 0:
+        raise HTTPException(status_code=400, detail="Margem nao pode ser negativa")
     item.product_id = payload.product_id
     item.base_price = payload.base_price
+    item.margin_percent = payload.margin_percent
     item.active = payload.active
     db.commit()
     db.refresh(item)
@@ -1108,6 +1201,7 @@ def create_order_item(order_id: int, payload: SalesOrderItemCreate, db: Session 
     table = get_price_table_or_404(db, order.price_table_id)
     build_order_items(db, order, table, [payload], order.payment_due_date)
     recalculate_order_totals(db, order)
+    refresh_order_approval_stage(db, order)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -1126,6 +1220,7 @@ def update_order_item(order_id: int, item_id: int, payload: SalesOrderItemCreate
     table = get_price_table_or_404(db, order.price_table_id)
     build_order_items(db, order, table, [payload], order.payment_due_date)
     recalculate_order_totals(db, order)
+    refresh_order_approval_stage(db, order)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -1142,6 +1237,7 @@ def delete_order_item(order_id: int, item_id: int, db: Session = Depends(get_db)
     db.delete(item)
     db.flush()
     recalculate_order_totals(db, order)
+    refresh_order_approval_stage(db, order)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -1173,6 +1269,7 @@ def update_order(order_id: int, payload: SalesOrderUpdate, db: Session = Depends
     order.notes = payload.notes
     build_order_items(db, order, table, payload.items, payload.payment_due_date)
     recalculate_order_totals(db, order)
+    refresh_order_approval_stage(db, order)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -1206,9 +1303,21 @@ def approve_order_financial(order_id: int, db: Session = Depends(get_db)):
         order.status = "financial_blocked"
         order.approval_stage = "financial"
     else:
-        order.status = "pending_commercial"
-        order.approval_stage = "commercial"
         order.financial_approved_at = datetime.utcnow()
+        pending_commercial = db.scalar(
+            select(SalesOrderItem).where(
+                SalesOrderItem.order_id == order.id,
+                SalesOrderItem.commercial_status == "pending",
+            )
+        )
+        if pending_commercial:
+            order.status = "pending_commercial"
+            order.approval_stage = "commercial"
+        else:
+            order.status = "approved"
+            order.approval_stage = "approved"
+            order.commercial_approved_at = datetime.utcnow()
+            order.approval_notes = "Pedido aprovado automaticamente na etapa comercial."
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -1221,9 +1330,71 @@ def approve_order_commercial(order_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Pedido nao encontrado")
     if order.status not in {"pending_commercial", "financial_blocked"}:
         raise HTTPException(status_code=400, detail="Pedido precisa passar pela aprovacao financeira")
-    order.status = "approved"
-    order.approval_stage = "approved"
-    order.commercial_approved_at = datetime.utcnow()
+    pending = db.scalar(
+        select(SalesOrderItem).where(
+            SalesOrderItem.order_id == order.id,
+            SalesOrderItem.commercial_status == "pending",
+        )
+    )
+    if pending:
+        raise HTTPException(status_code=400, detail="A aprovacao comercial agora deve ser feita item a item")
+    refresh_order_approval_stage(db, order)
+    db.commit()
+    db.refresh(order)
+    return order_to_read(db, order)
+
+
+@app.post("/orders/{order_id}/items/{item_id}/approve-commercial", response_model=SalesOrderRead, tags=["Pedidos"])
+def approve_order_item_commercial(order_id: int, item_id: int, db: Session = Depends(get_db)):
+    order = db.get(SalesOrder, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+    item = db.get(SalesOrderItem, item_id)
+    if not item or item.order_id != order.id:
+        raise HTTPException(status_code=404, detail="Item do pedido nao encontrado")
+    item.commercial_status = "approved"
+    recalculate_order_totals(db, order)
+    refresh_order_approval_stage(db, order)
+    db.commit()
+    db.refresh(order)
+    return order_to_read(db, order)
+
+
+@app.post("/orders/{order_id}/items/{item_id}/cancel", response_model=SalesOrderRead, tags=["Pedidos"])
+def cancel_order_item(order_id: int, item_id: int, payload: SalesOrderItemCancel, db: Session = Depends(get_db)):
+    order = db.get(SalesOrder, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+    item = db.get(SalesOrderItem, item_id)
+    if not item or item.order_id != order.id:
+        raise HTTPException(status_code=404, detail="Item do pedido nao encontrado")
+    cancel_qty = Decimal(str(payload.quantity or 0))
+    if cancel_qty <= 0:
+        raise HTTPException(status_code=400, detail="Quantidade de cancelamento deve ser maior que zero")
+    remaining = effective_quantity(item)
+    if cancel_qty > remaining:
+        raise HTTPException(status_code=400, detail="Quantidade de cancelamento maior que o saldo do item")
+    item.cancelled_quantity = Decimal(str(item.cancelled_quantity or 0)) + cancel_qty
+    recalculate_order_item(item)
+    recalculate_order_totals(db, order)
+    refresh_order_approval_stage(db, order)
+    db.commit()
+    db.refresh(order)
+    return order_to_read(db, order)
+
+
+@app.post("/orders/{order_id}/cancel", response_model=SalesOrderRead, tags=["Pedidos"])
+def cancel_order(order_id: int, db: Session = Depends(get_db)):
+    order = db.get(SalesOrder, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+    for item in db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all():
+        item.cancelled_quantity = item.quantity
+        recalculate_order_item(item)
+    recalculate_order_totals(db, order)
+    order.status = "cancelled"
+    order.approval_stage = "cancelled"
+    order.approval_notes = "Pedido cancelado."
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)

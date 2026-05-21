@@ -15,9 +15,9 @@ const emptyGroup = { code: "", name: "", description: "", active: true };
 const emptyClass = { product_group_id: "", code: "", name: "", description: "", active: true };
 const emptyProduct = { product_group_id: "", product_class_id: "", sku: "", name: "", unit: "UN", purchase_price: "0.00", cost_price: "0.00", sale_price: "0.00", description: "", active: true };
 const emptyPriceTable = { code: "", name: "", correction_mode: "outside", monthly_rate: "0.00", base_date: today, active: true };
-const emptyPriceItem = { product_id: "", base_price: "0.00", active: true };
+const emptyPriceItem = { product_id: "", base_price: "0.00", margin_percent: "5.00", active: true };
 const emptyOrder = { customer_id: "", price_table_id: "", order_date: today, payment_due_date: today, notes: "" };
-const emptyOrderItem = { product_id: "", quantity: "1" };
+const emptyOrderItem = { product_id: "", quantity: "1", negotiated_unit_price: "" };
 
 const MESSAGE_TYPES = {
   error: "error",
@@ -269,6 +269,7 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
     const payload = {
       product_id: Number(itemForm.product_id),
       base_price: Number(itemForm.base_price || 0),
+      margin_percent: Number(itemForm.margin_percent || 0),
       active: itemForm.active,
     };
     await run(() => editingItem ? api.put(`/price-table-items/${editingItem.id}`, payload) : api.post(`/price-tables/${item.id}/items`, payload));
@@ -287,6 +288,7 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
     setItemForm({
       product_id: priceItem.product_id || "",
       base_price: String(priceItem.base_price || "0.00"),
+      margin_percent: String(priceItem.margin_percent || "5.00"),
       active: priceItem.active,
     });
   }
@@ -322,6 +324,7 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
             <div className="detail-form">
               <Field label="Produto" wide><Select value={itemForm.product_id} onChange={(v) => setItemForm({ ...itemForm, product_id: v })} options={products} empty="Selecione" /></Field>
               <Field label="Preco base"><input type="number" min="0" step="0.01" value={itemForm.base_price} onChange={(e) => setItemForm({ ...itemForm, base_price: e.target.value })} /></Field>
+              <Field label="Margem %"><input type="number" min="0" step="0.01" value={itemForm.margin_percent} onChange={(e) => setItemForm({ ...itemForm, margin_percent: e.target.value })} /></Field>
               <Check label="Ativo" checked={itemForm.active} onChange={(v) => setItemForm({ ...itemForm, active: v })} />
               <div className="form-actions">
                 {editingItem && <button type="button" className="secondary-button" onClick={cancelItemEdit}>Cancelar item</button>}
@@ -329,9 +332,10 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
               </div>
             </div>
 
-            <DataTable columns={["Produto", "Preco base", "Status", "Acoes"]} rows={items.map((priceItem) => [
+            <DataTable columns={["Produto", "Preco base", "Margem", "Status", "Acoes"]} rows={items.map((priceItem) => [
               `${priceItem.product_sku || ""} ${priceItem.product_name || ""}`.trim(),
               money.format(Number(priceItem.base_price || 0)),
+              `${percent.format(Number(priceItem.margin_percent || 0))}%`,
               <Status active={priceItem.active} />,
               <RowActions onEdit={() => editItem(priceItem)} onRemove={() => removeItem(priceItem)} />,
             ])} />
@@ -574,7 +578,7 @@ function OrdersBrowser({ orders, customers, products, priceTables, run }) {
   }
 
   async function save(form, item) {
-    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_date: form.order_date, payment_due_date: form.payment_due_date, notes: form.notes.trim() || null, items: item ? item.items.map((row) => ({ product_id: row.product_id, quantity: row.quantity })) : [] };
+    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_date: form.order_date, payment_due_date: form.payment_due_date, notes: form.notes.trim() || null, items: item ? item.items.map((row) => ({ product_id: row.product_id, quantity: row.quantity, negotiated_unit_price: row.negotiated_unit_price })) : [] };
     await run(() => item ? api.put(`/orders/${item.id}`, payload) : api.post("/orders", payload));
     setModal(null);
   }
@@ -601,18 +605,31 @@ function OrdersBrowser({ orders, customers, products, priceTables, run }) {
 function OrderApprovalsPage({ orders, run }) {
   const [activeApproval, setActiveApproval] = useState("financial");
   const [query, setQuery] = useState("");
-  const statuses = activeApproval === "financial" ? ["pending_financial", "financial_blocked"] : ["pending_commercial"];
   const filtered = useMemo(() => {
-    const pool = orders.filter((order) => statuses.includes(order.status));
+    const pool = orders.filter((order) => ["pending_financial", "financial_blocked"].includes(order.status));
     return filterRows(pool, query, ["order_number", "customer_name", "price_table_name", "approval_notes"]);
-  }, [orders, query, activeApproval]);
+  }, [orders, query]);
+  const commercialItems = useMemo(() => {
+    const rows = orders.flatMap((order) => (order.items || [])
+      .filter((item) => item.commercial_status === "pending")
+      .map((item) => ({ ...item, order })));
+    return filterRows(rows, query, ["product_name", "product_sku", "commercial_status"]);
+  }, [orders, query]);
 
   function actionButtons(item) {
     return (
       <div className="row-actions">
         {activeApproval === "financial" && <button type="button" onClick={() => run(() => api.post(`/orders/${item.id}/approve-financial`))} title="Aprovar financeiro"><CheckCircle2 size={15} /></button>}
-        {activeApproval === "commercial" && <button type="button" onClick={() => run(() => api.post(`/orders/${item.id}/approve-commercial`))} title="Aprovar comercial"><CheckCircle2 size={15} /></button>}
         <button type="button" onClick={() => run(() => api.post(`/orders/${item.id}/reject`))} title="Rejeitar"><XCircle size={15} /></button>
+      </div>
+    );
+  }
+
+  function commercialActionButtons(row) {
+    return (
+      <div className="row-actions">
+        <button type="button" onClick={() => run(() => api.post(`/orders/${row.order.id}/items/${row.id}/approve-commercial`))} title="Aprovar item"><CheckCircle2 size={15} /></button>
+        <button type="button" onClick={() => run(() => api.post(`/orders/${row.order.id}/reject`))} title="Rejeitar pedido"><XCircle size={15} /></button>
       </div>
     );
   }
@@ -632,17 +649,31 @@ function OrderApprovalsPage({ orders, run }) {
         <button type="button" className={activeApproval === "financial" ? "active" : ""} onClick={() => setActiveApproval("financial")}>Financeira</button>
         <button type="button" className={activeApproval === "commercial" ? "active" : ""} onClick={() => setActiveApproval("commercial")}>Comercial</button>
       </div>
-      <DataTable columns={["Pedido", "Cliente", "Prazo", "Total", "Lucro", "Rentab.", "Status", "Observacao", "Acoes"]} rows={filtered.map((item) => [
-        item.order_number,
-        item.customer_name,
-        item.payment_due_date,
-        money.format(Number(item.total_amount || 0)),
-        money.format(Number(item.gross_profit_amount || 0)),
-        `${percent.format(Number(item.profitability_percent || 0))}%`,
-        orderStatusLabel(item.status),
-        item.approval_notes || "-",
-        actionButtons(item),
-      ])} />
+      {activeApproval === "financial" && (
+        <DataTable columns={["Pedido", "Cliente", "Prazo", "Total", "Lucro", "Rentab.", "Status", "Observacao", "Acoes"]} rows={filtered.map((item) => [
+          item.order_number,
+          item.customer_name,
+          item.payment_due_date,
+          money.format(Number(item.total_amount || 0)),
+          money.format(Number(item.gross_profit_amount || 0)),
+          `${percent.format(Number(item.profitability_percent || 0))}%`,
+          orderStatusLabel(item.status),
+          item.approval_notes || "-",
+          actionButtons(item),
+        ])} />
+      )}
+      {activeApproval === "commercial" && (
+        <DataTable columns={["Pedido", "Cliente", "Item", "Preco tabela", "Negociado", "Min.", "Max.", "Acoes"]} rows={commercialItems.map((row) => [
+          row.order.order_number,
+          row.order.customer_name,
+          `${row.product_sku} - ${row.product_name}`,
+          money.format(Number(row.corrected_unit_price || 0)),
+          money.format(Number(row.negotiated_unit_price || 0)),
+          money.format(Number(row.min_unit_price || 0)),
+          money.format(Number(row.max_unit_price || 0)),
+          commercialActionButtons(row),
+        ])} />
+      )}
     </section>
   );
 }
@@ -661,12 +692,15 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
       return;
     }
     api.get("/price-preview", { params: { price_table_id: form.price_table_id, product_id: itemForm.product_id, payment_due_date: form.payment_due_date } })
-      .then((response) => setPreview(response.data))
+      .then((response) => {
+        setPreview(response.data);
+        setItemForm((current) => current.negotiated_unit_price ? current : { ...current, negotiated_unit_price: String(response.data.corrected_price || "") });
+      })
       .catch(() => setPreview(null));
   }, [form.price_table_id, itemForm.product_id, form.payment_due_date]);
 
   async function saveHeader() {
-    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_date: form.order_date, payment_due_date: form.payment_due_date, notes: form.notes.trim() || null, items: currentOrder?.items?.map((row) => ({ product_id: row.product_id, quantity: Number(row.quantity || 0) })) || [] };
+    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_date: form.order_date, payment_due_date: form.payment_due_date, notes: form.notes.trim() || null, items: currentOrder?.items?.map((row) => ({ product_id: row.product_id, quantity: Number(row.quantity || 0), negotiated_unit_price: Number(row.negotiated_unit_price || row.corrected_unit_price || 0) })) || [] };
     const response = currentOrder
       ? await api.put(`/orders/${currentOrder.id}`, payload)
       : await api.post("/orders", { ...payload, items: [] });
@@ -688,7 +722,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
 
   async function saveOrderItem() {
     if (!currentOrder?.id || !itemForm.product_id) return;
-    const payload = { product_id: Number(itemForm.product_id), quantity: Number(itemForm.quantity || 0) };
+    const payload = { product_id: Number(itemForm.product_id), quantity: Number(itemForm.quantity || 0), negotiated_unit_price: itemForm.negotiated_unit_price ? Number(itemForm.negotiated_unit_price) : null };
     if (editingItem) await api.put(`/orders/${currentOrder.id}/items/${editingItem.id}`, payload);
     else await api.post(`/orders/${currentOrder.id}/items`, payload);
     setEditingItem(null);
@@ -703,9 +737,25 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
     await run(async () => ({ data: true }));
   }
 
+  async function cancelOrderItem(row) {
+    const remaining = Number(row.quantity || 0) - Number(row.cancelled_quantity || 0);
+    const value = window.prompt(`Quantidade para cancelar. Saldo atual: ${decimal.format(remaining)}`, String(remaining));
+    if (!value) return;
+    await api.post(`/orders/${currentOrder.id}/items/${row.id}/cancel`, { quantity: Number(value.replace(",", ".")) });
+    await reloadOrder(currentOrder.id);
+    await run(async () => ({ data: true }));
+  }
+
+  async function cancelOrder() {
+    if (!currentOrder?.id || !window.confirm("Cancelar o pedido inteiro?")) return;
+    const response = await api.post(`/orders/${currentOrder.id}/cancel`);
+    setCurrentOrder(response.data);
+    await run(async () => response);
+  }
+
   function editOrderItem(row) {
     setEditingItem(row);
-    setItemForm({ product_id: row.product_id || "", quantity: String(row.quantity || "1") });
+    setItemForm({ product_id: row.product_id || "", quantity: String(row.quantity || "1"), negotiated_unit_price: String(row.negotiated_unit_price || row.corrected_unit_price || "") });
   }
 
   return (
@@ -719,6 +769,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
         {currentOrder?.approval_notes && <Field label="Aprovacao" wide><input disabled value={currentOrder.approval_notes} /></Field>}
         <div className="form-actions"><button type="button" className="secondary-button" onClick={saveHeader}>{currentOrder ? "Salvar cabecalho" : "Salvar cabecalho para itens"}</button></div>
         {currentOrder?.status === "draft" && <div className="form-actions"><button type="button" className="primary-button" onClick={submitOrder}><Send size={16} /> Enviar para aprovacao</button></div>}
+        {currentOrder?.id && !["cancelled", "rejected"].includes(currentOrder.status) && <div className="form-actions"><button type="button" className="secondary-button" onClick={cancelOrder}>Cancelar pedido</button></div>}
       </div>
 
       <section className="modal-detail">
@@ -736,20 +787,26 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
             <div className="detail-form">
               <Field label="Produto" wide><Select value={itemForm.product_id} onChange={(v) => setItemForm({ ...itemForm, product_id: v })} options={products} empty="Selecione" /></Field>
               <Field label="Quantidade"><input type="number" min="0.0001" step="0.0001" value={itemForm.quantity} onChange={(e) => setItemForm({ ...itemForm, quantity: e.target.value })} /></Field>
+              <Field label="Valor negociado"><input type="number" min="0" step="0.01" value={itemForm.negotiated_unit_price} onChange={(e) => setItemForm({ ...itemForm, negotiated_unit_price: e.target.value })} /></Field>
               <div className="form-actions">
                 {editingItem && <button type="button" className="secondary-button" onClick={() => { setEditingItem(null); setItemForm(emptyOrderItem); }}>Cancelar item</button>}
                 <button type="button" className="primary-button" onClick={saveOrderItem}>{editingItem ? "Salvar item" : "Incluir item"}</button>
               </div>
             </div>
-            <DataTable columns={["Produto", "Qtd.", "Custo un.", "Preco corrigido", "Total", "Lucro", "Rentab.", "Acoes"]} rows={(currentOrder.items || []).map((row) => [
+            <DataTable columns={["Produto", "Qtd.", "Cancel.", "Preco tabela", "Negociado", "Comercial", "Total", "Lucro", "Acoes"]} rows={(currentOrder.items || []).map((row) => [
               `${row.product_sku} - ${row.product_name}`,
               decimal.format(Number(row.quantity || 0)),
-              money.format(Number(row.cost_unit_price || 0)),
+              decimal.format(Number(row.cancelled_quantity || 0)),
               money.format(Number(row.corrected_unit_price || 0)),
+              money.format(Number(row.negotiated_unit_price || 0)),
+              commercialStatusLabel(row.commercial_status),
               money.format(Number(row.total_amount || 0)),
               money.format(Number(row.gross_profit_amount || 0)),
-              `${percent.format(Number(row.profitability_percent || 0))}%`,
-              <RowActions onEdit={() => editOrderItem(row)} onRemove={() => removeOrderItem(row)} />,
+              <div className="row-actions">
+                <button type="button" onClick={() => editOrderItem(row)} title="Editar"><Edit3 size={15} /></button>
+                <button type="button" onClick={() => cancelOrderItem(row)} title="Cancelar quantidade">Canc.</button>
+                <button type="button" onClick={() => window.confirm("Confirma a exclusao?") && removeOrderItem(row)} title="Excluir"><Trash2 size={15} /></button>
+              </div>,
             ])} />
             <div className="order-summary">
               <span>Total: <strong>{money.format(Number(currentOrder.total_amount || 0))}</strong></span>
@@ -844,8 +901,18 @@ function orderStatusLabel(status) {
     pending_commercial: "Aprov. comercial",
     approved: "Aprovado",
     rejected: "Rejeitado",
+    cancelled: "Cancelado",
   };
   return labels[status] || status;
+}
+
+function commercialStatusLabel(status) {
+  const labels = {
+    approved: "Aprovado",
+    pending: "Pendente",
+    rejected: "Rejeitado",
+  };
+  return labels[status] || status || "-";
 }
 
 function DataTable({ columns, rows }) {

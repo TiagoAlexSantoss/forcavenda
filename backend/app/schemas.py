@@ -171,6 +171,7 @@ class PriceTableRead(PriceTableBase):
 class PriceTableItemBase(BaseModel):
     product_id: int
     base_price: Decimal
+    margin_percent: Decimal = Decimal("5.00")
     active: bool = True
 
 
@@ -205,6 +206,11 @@ class PricePreviewRead(BaseModel):
 class SalesOrderItemCreate(BaseModel):
     product_id: int
     quantity: Decimal
+    negotiated_unit_price: Decimal | None = None
+
+
+class SalesOrderItemCancel(BaseModel):
+    quantity: Decimal
 
 
 class SalesOrderCreate(BaseModel):
@@ -226,13 +232,20 @@ class SalesOrderItemRead(BaseModel):
     product_sku: str
     product_name: str
     quantity: Decimal
+    cancelled_quantity: Decimal = Decimal("0.00")
     base_unit_price: Decimal
     corrected_unit_price: Decimal
+    negotiated_unit_price: Decimal = Decimal("0.00")
+    price_margin_percent: Decimal = Decimal("5.00")
+    min_unit_price: Decimal = Decimal("0.00")
+    max_unit_price: Decimal = Decimal("0.00")
     cost_unit_price: Decimal = Decimal("0.00")
     total_amount: Decimal
     total_cost_amount: Decimal = Decimal("0.00")
     gross_profit_amount: Decimal = Decimal("0.00")
     profitability_percent: Decimal = Decimal("0.00")
+    commercial_status: str = "approved"
+    cancellation_status: str = "active"
 
     class Config:
         from_attributes = True

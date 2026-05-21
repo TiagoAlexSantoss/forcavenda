@@ -47,7 +47,7 @@ O item do pedido busca o preco base na tabela de preco e calcula o preco corrigi
 O fluxo atual tem duas etapas:
 
 - Financeira: valida limite de credito, titulos vencidos acima da tolerancia do perfil comercial e, quando configurado, dias sem movimentacao.
-- Comercial: aprova o pedido depois da etapa financeira.
+- Comercial: aprova itens do pedido que ficaram fora da margem de negociacao.
 
 O limite de credito pertence ao cadastro de pessoas do EasyFinance (`people.credit_limit`) e e apenas consultado pelo Forca de Vendas. Valores pagos, em aberto e titulos vencidos ficam no EasyFinance; o Forca usa esses dados somente para decidir a aprovacao, sem exibir o detalhe financeiro na tela.
 
@@ -57,6 +57,16 @@ O cadastro **Perfis comerciais** classifica clientes como Novo, Bom, Excelente, 
 - Dias tolerados para titulos vencidos.
 - Se deve bloquear por falta de movimentacao.
 - Se deve bloquear por titulos vencidos.
+
+## Negociacao e cancelamento
+
+Cada item da tabela de preco tem uma margem percentual, iniciando em `5%` por padrao. No pedido, o preco corrigido vem da tabela e o vendedor pode informar um preco negociado:
+
+- Dentro da margem, o item fica comercialmente aprovado.
+- Fora da margem, o item fica pendente de aprovacao comercial.
+- A aprovacao comercial e feita por item, nao pelo pedido inteiro.
+
+O pedido tambem aceita cancelamento integral ou parcial por item. Quando a quantidade cancelada de todos os itens zera o saldo do pedido, o pedido inteiro passa para `cancelled`.
 
 ## Swagger / Endpoints
 
@@ -73,7 +83,7 @@ Grupos publicados no Swagger:
 - Perfis comerciais: `GET/POST /customer-profiles`, `PUT/DELETE /customer-profiles/{profile_id}`.
 - Produtos: grupos, classes e produtos.
 - Tabelas de preco: cabecalho, itens e `GET /price-preview`.
-- Pedidos: CRUD do pedido e itens, alem de `POST /orders/{order_id}/submit`, `POST /orders/{order_id}/approve-financial`, `POST /orders/{order_id}/approve-commercial` e `POST /orders/{order_id}/reject`.
+- Pedidos: CRUD do pedido e itens, alem de `POST /orders/{order_id}/submit`, `POST /orders/{order_id}/approve-financial`, `POST /orders/{order_id}/items/{item_id}/approve-commercial`, `POST /orders/{order_id}/items/{item_id}/cancel`, `POST /orders/{order_id}/cancel` e `POST /orders/{order_id}/reject`.
 
 ## Rodar pelo VS Code
 
