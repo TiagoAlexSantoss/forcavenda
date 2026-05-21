@@ -1249,6 +1249,7 @@ def delete_order(order_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Pedido nao encontrado")
     for item in db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all():
         db.delete(item)
+    db.flush()
     db.delete(order)
     db.commit()
     return {"ok": True}
