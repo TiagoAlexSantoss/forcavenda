@@ -478,6 +478,103 @@ th {
   color: #64748b;
 }
 
+.order-status.draft {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.order-status.pending_financial,
+.order-status.pending_commercial {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.order-status.financial_blocked,
+.order-status.overdue {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.order-status.approved,
+.commercial-status.approved {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.order-status.rejected,
+.commercial-status.rejected {
+  background: #f3e8ff;
+  color: #6b21a8;
+}
+
+.order-status.cancelled {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.commercial-status.pending {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.commercial-status.empty {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.order-row-approval {
+  background: linear-gradient(90deg, rgba(254, 243, 199, 0.72), rgba(255, 251, 235, 0.28));
+}
+
+.order-row-overdue {
+  background: linear-gradient(90deg, rgba(254, 226, 226, 0.78), rgba(255, 247, 237, 0.3));
+}
+
+.order-row-approval.order-row-overdue {
+  background: linear-gradient(90deg, rgba(254, 226, 226, 0.82), rgba(254, 243, 199, 0.42));
+}
+
+.order-row-overdue td:first-child {
+  box-shadow: inset 4px 0 0 #fca5a5;
+}
+
+.order-row-approval:not(.order-row-overdue) td:first-child {
+  box-shadow: inset 4px 0 0 #fbbf24;
+}
+
+.order-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: -4px 0 12px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.order-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+}
+
+.legend-dot.approval {
+  background: #fbbf24;
+}
+
+.legend-dot.overdue {
+  background: #fca5a5;
+}
+
+.legend-dot.approved {
+  background: #22c55e;
+}
+
 .muted-inline {
   color: #64748b;
   font-size: 13px;
@@ -636,6 +733,36 @@ th {
   border: 1px solid #d9e2ec;
   border-radius: 8px;
   background: #f8fafc;
+}
+
+.order-context {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(150px, 1fr));
+  gap: 10px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid #d9e2ec;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.order-context > span {
+  display: block;
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.order-context strong {
+  display: block;
+  width: fit-content;
+  margin-top: 4px;
+  color: #17202a;
+  font-size: 13px;
+}
+
+.order-context .status-pill {
+  margin-top: 4px;
 }
 
 .order-summary span {
@@ -894,6 +1021,7 @@ th {
   .detail-form,
   .tier-form,
   .order-summary,
+  .order-context,
   .authorization-reason,
   .health-summary {
     grid-template-columns: 1fr;

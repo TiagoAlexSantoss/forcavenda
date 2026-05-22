@@ -17,7 +17,7 @@ const emptyProduct = { product_group_id: "", product_class_id: "", sku: "", name
 const emptyPriceTable = { code: "", name: "", correction_mode: "outside", monthly_rate: "0.00", base_date: today, active: true };
 const emptyPriceItem = { product_id: "", base_price: "0.00", margin_percent: "5.00", active: true };
 const emptyPriceTier = { min_quantity: "1.00", discount_percent: "0.00", active: true };
-const emptyOrder = { customer_id: "", price_table_id: "", order_date: today, payment_due_date: today, notes: "" };
+const emptyOrder = { customer_id: "", price_table_id: "", order_date: today, payment_due_date: today, delivery_date: "", notes: "" };
 const emptyOrderItem = { product_id: "", quantity: "1", negotiated_unit_price: "" };
 
 const MESSAGE_TYPES = {
@@ -94,6 +94,18 @@ function App() {
     setMessage(null);
   }
 
+  const pageMeta = {
+    products: ["Cadastros", "Produtos"],
+    priceTables: ["Cadastros", "Tabelas de preco"],
+    groups: ["Cadastros", "Grupos de produtos"],
+    classes: ["Cadastros", "Classes de produtos"],
+    customers: ["Cadastros", "Clientes"],
+    customerProfiles: ["Cadastros", "Perfis comerciais"],
+    orders: ["Operacoes", "Pedidos"],
+    customerManagement: ["Operacoes", "Gestao de clientes"],
+    approvals: ["Operacoes", "Autorizacoes"],
+  }[activeTab] || ["EasySales", "EasySales"];
+
   async function run(action) {
     try {
       await action();
@@ -137,8 +149,8 @@ function App() {
       <main className="workspace">
         <header className="topbar">
           <div>
-            <p>Produto separado</p>
-            <h1>EasySales</h1>
+            <p>{pageMeta[0]}</p>
+            <h1>{pageMeta[1]}</h1>
           </div>
           <button className="secondary-button" onClick={loadAll}><RefreshCcw size={17} /> Atualizar</button>
         </header>
@@ -746,29 +758,34 @@ function OrdersBrowser({ orders, customers, products, priceTables, run }) {
 
   function toForm(item) {
     if (!item) return emptyOrder;
-    return { customer_id: `${item.customer_source}:${item.customer_external_id}`, price_table_id: item.price_table_id || "", order_date: item.order_date, payment_due_date: item.payment_due_date, notes: item.notes || "" };
+    return { customer_id: `${item.customer_source}:${item.customer_external_id}`, price_table_id: item.price_table_id || "", order_date: item.order_date, payment_due_date: item.payment_due_date, delivery_date: item.delivery_date || "", notes: item.notes || "" };
   }
 
   async function save(form, item) {
-    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_date: form.order_date, payment_due_date: form.payment_due_date, notes: form.notes.trim() || null, items: item ? item.items.map((row) => ({ product_id: row.product_id, quantity: row.quantity, negotiated_unit_price: row.negotiated_unit_price })) : [] };
+    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: item ? item.items.map((row) => ({ product_id: row.product_id, quantity: row.quantity, negotiated_unit_price: row.negotiated_unit_price })) : [] };
     await run(() => item ? api.put(`/orders/${item.id}`, payload) : api.post("/orders", payload));
     setModal(null);
   }
 
   return (
     <Browser title="Pedidos" eyebrow="Operacoes" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: toForm(null) })}>
-      <DataTable columns={["Pedido", "Cliente", "Tabela", "Pedido em", "Prazo", "Total", "Lucro", "Rentab. pedido", "Status", "Acoes"]} rows={rows.map((item) => [
-        item.order_number,
-        item.customer_name,
-        item.price_table_name || item.price_table_id,
-        item.order_date,
-        item.payment_due_date,
-        money.format(Number(item.total_amount || 0)),
-        money.format(Number(item.gross_profit_amount || 0)),
-        `${percent.format(Number(item.profitability_percent || 0))}%`,
-        orderStatusLabel(item.status),
-        <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/orders/${item.id}`))} />,
-      ])} />
+      <OrderLegend />
+      <DataTable columns={["Pedido", "Cliente", "Tabela", "Pedido em", "Pagamento", "Entrega", "Total", "Lucro", "Rentab.", "Status", "Acoes"]} rows={rows.map((item) => ({
+        className: orderRowClassName(item),
+        cells: [
+          item.order_number,
+          item.customer_name,
+          item.price_table_name || item.price_table_id,
+          item.order_date,
+          item.payment_due_date,
+          item.delivery_date || "-",
+          money.format(Number(item.total_amount || 0)),
+          money.format(Number(item.gross_profit_amount || 0)),
+          `${percent.format(Number(item.profitability_percent || 0))}%`,
+          <OrderStatus status={item.status} overdue={isOrderDeliveryOverdue(item)} />,
+          <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/orders/${item.id}`))} />,
+        ],
+      }))} />
       {modal && <OrderModal state={modal} setState={setModal} customers={customers} products={products} priceTables={priceTables} run={run} onSave={save} />}
     </Browser>
   );
@@ -965,7 +982,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
   }, [form.price_table_id, itemForm.product_id, itemForm.quantity, form.payment_due_date]);
 
   async function saveHeader() {
-    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_date: form.order_date, payment_due_date: form.payment_due_date, notes: form.notes.trim() || null, items: currentOrder?.items?.map((row) => ({ product_id: row.product_id, quantity: Number(row.quantity || 0), negotiated_unit_price: Number(row.negotiated_unit_price || row.corrected_unit_price || 0) })) || [] };
+    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: currentOrder?.items?.map((row) => ({ product_id: row.product_id, quantity: Number(row.quantity || 0), negotiated_unit_price: Number(row.negotiated_unit_price || row.corrected_unit_price || 0) })) || [] };
     const response = currentOrder
       ? await api.put(`/orders/${currentOrder.id}`, payload)
       : await api.post("/orders", { ...payload, items: [] });
@@ -1029,6 +1046,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
         <Field label="Cliente" wide><Select value={form.customer_id} onChange={(v) => update("customer_id", v)} options={customers} empty="Selecione" required labelKey="name" valueKey="id" /></Field>
         <Field label="Tabela"><Select value={form.price_table_id} onChange={(v) => update("price_table_id", v)} options={priceTables} empty="Selecione" required /></Field>
         <Field label="Prazo pagamento"><input type="date" value={form.payment_due_date} onChange={(e) => update("payment_due_date", e.target.value)} /></Field>
+        <Field label="Previsao entrega"><input type="date" value={form.delivery_date} onChange={(e) => update("delivery_date", e.target.value)} /></Field>
         <Field label="Data pedido"><input type="date" value={form.order_date} onChange={(e) => update("order_date", e.target.value)} /></Field>
         <Field label="Observacao" wide><input value={form.notes} onChange={(e) => update("notes", e.target.value)} /></Field>
         {currentOrder?.approval_notes && <Field label="Autorizacao" wide><input disabled value={currentOrder.approval_notes} /></Field>}
@@ -1038,6 +1056,14 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
       </div>
 
       <section className="modal-detail">
+        {currentOrder?.id && (
+          <div className="order-context">
+            <span>Status <OrderStatus status={currentOrder.status} overdue={isOrderDeliveryOverdue(currentOrder)} /></span>
+            <span>Pagamento <strong>{currentOrder.payment_due_date}</strong></span>
+            <span>Entrega <strong>{currentOrder.delivery_date || "Nao informada"}</strong></span>
+            <span>Cliente <strong>{currentOrder.customer_name}</strong></span>
+          </div>
+        )}
         <div className="panel-header">
           <div>
             <p>Itens do pedido</p>
@@ -1064,7 +1090,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
               decimal.format(Number(row.cancelled_quantity || 0)),
               money.format(Number(row.corrected_unit_price || 0)),
               money.format(Number(row.negotiated_unit_price || 0)),
-              commercialStatusLabel(row.commercial_status),
+              <CommercialStatus status={row.commercial_status} />,
               money.format(Number(row.total_amount || 0)),
               money.format(Number(row.gross_profit_amount || 0)),
               <div className="row-actions">
@@ -1172,6 +1198,35 @@ function Status({ active }) {
   return <span className={`status-pill ${active ? "active" : "inactive"}`}>{active ? "Ativo" : "Inativo"}</span>;
 }
 
+function isOrderDeliveryOverdue(order) {
+  return Boolean(order.delivery_date && order.delivery_date < today && !["cancelled", "rejected"].includes(order.status));
+}
+
+function isOrderInApproval(order) {
+  return ["pending_financial", "financial_blocked", "pending_commercial"].includes(order.status);
+}
+
+function orderRowClassName(order) {
+  return [
+    isOrderInApproval(order) ? "order-row-approval" : "",
+    isOrderDeliveryOverdue(order) ? "order-row-overdue" : "",
+  ].filter(Boolean).join(" ");
+}
+
+function OrderLegend() {
+  return (
+    <div className="order-legend">
+      <span><i className="legend-dot approval" /> Em autorizacao</span>
+      <span><i className="legend-dot overdue" /> Entrega vencida</span>
+      <span><i className="legend-dot approved" /> Autorizado</span>
+    </div>
+  );
+}
+
+function OrderStatus({ status, overdue }) {
+  return <span className={`status-pill order-status ${status} ${overdue ? "overdue" : ""}`}>{overdue ? "Entrega vencida" : orderStatusLabel(status)}</span>;
+}
+
 function orderStatusLabel(status) {
   const labels = {
     draft: "Rascunho",
@@ -1183,6 +1238,10 @@ function orderStatusLabel(status) {
     cancelled: "Cancelado",
   };
   return labels[status] || status;
+}
+
+function CommercialStatus({ status }) {
+  return <span className={`status-pill commercial-status ${status || "empty"}`}>{commercialStatusLabel(status)}</span>;
 }
 
 function commercialStatusLabel(status) {
@@ -1209,7 +1268,10 @@ function DataTable({ columns, rows }) {
       <table>
         <thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
         <tbody>
-          {rows.map((row, index) => <tr key={index}>{row.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>)}
+          {rows.map((row, index) => {
+            const cells = Array.isArray(row) ? row : row.cells;
+            return <tr key={index} className={Array.isArray(row) ? "" : row.className}>{cells.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>;
+          })}
           {rows.length === 0 && <tr><td colSpan={columns.length} className="empty">Nenhum registro encontrado.</td></tr>}
         </tbody>
       </table>

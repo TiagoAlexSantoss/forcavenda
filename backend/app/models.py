@@ -136,6 +136,7 @@ class SalesOrder(Base):
     price_table_id: Mapped[int] = mapped_column(ForeignKey("sf_price_tables.id"), nullable=False)
     order_date: Mapped[date] = mapped_column(Date, nullable=False, default=date.today)
     payment_due_date: Mapped[date] = mapped_column(Date, nullable=False)
+    delivery_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
     approval_stage: Mapped[str] = mapped_column(String(30), nullable=False, default="draft")
     approval_notes: Mapped[str | None] = mapped_column(String(800), nullable=True)

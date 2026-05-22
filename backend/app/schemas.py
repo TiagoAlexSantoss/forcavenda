@@ -266,6 +266,7 @@ class SalesOrderCreate(BaseModel):
     price_table_id: int
     order_date: date
     payment_due_date: date
+    delivery_date: date | None = None
     notes: str | None = None
     items: list[SalesOrderItemCreate] = Field(default_factory=list)
 
@@ -320,6 +321,7 @@ class SalesOrderRead(BaseModel):
     price_table_name: str | None = None
     order_date: date
     payment_due_date: date
+    delivery_date: date | None = None
     status: str
     approval_stage: str = "draft"
     approval_notes: str | None = None

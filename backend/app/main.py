@@ -99,6 +99,7 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS profitability_percent NUMERIC(10, 4) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS approval_stage VARCHAR(30) NOT NULL DEFAULT 'draft'"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS approval_notes VARCHAR(800)"))
+        connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS delivery_date DATE"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS financial_approved_at TIMESTAMP"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS commercial_approved_at TIMESTAMP"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS cost_unit_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
@@ -581,6 +582,7 @@ def order_to_read(db: Session, order: SalesOrder) -> dict:
         "price_table_name": table.name if table else None,
         "order_date": order.order_date,
         "payment_due_date": order.payment_due_date,
+        "delivery_date": order.delivery_date,
         "status": order.status,
         "approval_stage": order.approval_stage,
         "approval_notes": order.approval_notes,
@@ -1531,6 +1533,7 @@ def create_order(payload: SalesOrderCreate, db: Session = Depends(get_db)):
         price_table_id=table.id,
         order_date=payload.order_date,
         payment_due_date=payload.payment_due_date,
+        delivery_date=payload.delivery_date,
         status="draft",
         approval_stage="draft",
         total_amount=Decimal("0"),
@@ -1616,6 +1619,7 @@ def update_order(order_id: int, payload: SalesOrderUpdate, db: Session = Depends
     order.price_table_id = table.id
     order.order_date = payload.order_date
     order.payment_due_date = payload.payment_due_date
+    order.delivery_date = payload.delivery_date
     order.status = "draft"
     order.approval_stage = "draft"
     order.approval_notes = None
