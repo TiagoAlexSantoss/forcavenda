@@ -441,18 +441,84 @@ def next_order_number(db: Session) -> str:
     return f"PV-{(latest_id or 0) + 1:06d}"
 
 
-def order_authorization_reasons(order: SalesOrder, items: list[SalesOrderItem]) -> list[dict]:
+def financial_authorization_reasons(db: Session, order: SalesOrder) -> list[dict]:
+    if order.status not in {"pending_financial", "financial_blocked"}:
+        return []
     reasons = []
-    if order.status in {"pending_financial", "financial_blocked"} and order.approval_notes:
+    profile_id = resolve_customer(db, f"{order.customer_source}:{order.customer_external_id}").get("profile_id")
+    profile = db.get(CustomerProfile, profile_id) if profile_id else None
+    if order.customer_source != "easyfinance":
+        return [
+            {
+                "segment": "financial",
+                "scope": "order",
+                "reason": "Cliente local sem consulta financeira integrada.",
+                "status": "pending",
+                "suggested_role": "financeiro",
+            }
+        ]
+    financial = easyfinance_customer_financial(db, order.customer_external_id)
+    projected_open = money_round(financial["open_amount"] + Decimal(str(order.total_amount or 0)))
+    credit_limit = money_round(financial["credit_limit"])
+    if projected_open > credit_limit:
         reasons.append(
             {
                 "segment": "financial",
                 "scope": "order",
-                "reason": order.approval_notes,
+                "reason": f"Limite de credito excedido. Limite cadastrado: {credit_limit}; aberto projetado com o pedido: {projected_open}.",
                 "status": "blocked" if order.status == "financial_blocked" else "pending",
                 "suggested_role": "financeiro",
             }
         )
+    if not profile:
+        reasons.append(
+            {
+                "segment": "financial",
+                "scope": "order",
+                "reason": "Cliente sem perfil comercial para definir tolerancias financeiras.",
+                "status": "pending",
+                "suggested_role": "financeiro",
+            }
+        )
+    if profile and profile.block_overdue_titles and financial["oldest_overdue_days"] > profile.max_overdue_days:
+        reasons.append(
+            {
+                "segment": "financial",
+                "scope": "order",
+                "reason": f"Titulo vencido ha {financial['oldest_overdue_days']} dia(s); perfil {profile.name} tolera ate {profile.max_overdue_days} dia(s).",
+                "status": "blocked" if order.status == "financial_blocked" else "pending",
+                "suggested_role": "financeiro",
+            }
+        )
+    if profile and profile.block_without_movement:
+        inactive_days = financial["days_without_movement"]
+        if inactive_days is None or inactive_days > profile.max_inactive_days:
+            label = "sem historico de movimentacao" if inactive_days is None else f"sem movimentacao ha {inactive_days} dia(s)"
+            reasons.append(
+                {
+                    "segment": "financial",
+                    "scope": "order",
+                    "reason": f"Cliente {label}; perfil {profile.name} tolera ate {profile.max_inactive_days} dia(s).",
+                    "status": "blocked" if order.status == "financial_blocked" else "pending",
+                    "suggested_role": "financeiro",
+                }
+            )
+    if not reasons:
+        reasons.append(
+            {
+                "segment": "financial",
+                "scope": "order",
+                "reason": "Pedido aguardando conferencia financeira de credito e inadimplencia.",
+                "status": "pending",
+                "suggested_role": "financeiro",
+            }
+        )
+    return reasons
+
+
+def order_authorization_reasons(db: Session, order: SalesOrder, items: list[SalesOrderItem]) -> list[dict]:
+    reasons = []
+    reasons.extend(financial_authorization_reasons(db, order))
     for item in items:
         if item.commercial_status == "pending":
             reasons.append(
@@ -496,7 +562,7 @@ def order_to_read(db: Session, order: SalesOrder) -> dict:
         "gross_profit_amount": order.gross_profit_amount,
         "profitability_percent": order.profitability_percent,
         "notes": order.notes,
-        "authorization_reasons": order_authorization_reasons(order, items),
+        "authorization_reasons": order_authorization_reasons(db, order, items),
         "items": items,
     }
 
@@ -1453,7 +1519,7 @@ def submit_order(order_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Pedido sem itens ou total zerado")
     order.status = "pending_financial"
     order.approval_stage = "financial"
-    order.approval_notes = "Pedido enviado para aprovacao financeira."
+    order.approval_notes = "Pedido enviado para autorizacao financeira: limite de credito, inadimplencia e regras do perfil comercial."
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
