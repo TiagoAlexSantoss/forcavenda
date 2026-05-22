@@ -1,4 +1,4 @@
-# Forca de Vendas
+# EasySales
 
 Produto separado do ecossistema Insights X para operacao comercial, catalogo de produtos e base futura de pedidos, CRM e app de campo.
 
@@ -21,7 +21,7 @@ CUSTOMER_PROVIDER=easyfinance
 
 ## Modelo comercial
 
-O produto pode operar sozinho ou integrado ao ecossistema. Quando `CUSTOMER_PROVIDER=easyfinance`, a lista de clientes e lida da tabela `people` do EasyFinance, mas as tabelas comerciais continuam proprias do Forca de Vendas com prefixo `sf_`.
+O EasySales pode operar sozinho ou integrado ao ecossistema. Quando `CUSTOMER_PROVIDER=easyfinance`, a lista de clientes e lida da tabela `people` do EasyFinance, mas as tabelas comerciais continuam proprias do EasySales com prefixo `sf_`.
 
 Cadastros atuais:
 
@@ -49,9 +49,9 @@ O fluxo atual tem duas etapas:
 - Financeira: valida limite de credito, titulos vencidos acima da tolerancia do perfil comercial e, quando configurado, dias sem movimentacao.
 - Comercial: aprova itens do pedido que ficaram fora da margem de negociacao.
 
-O limite de credito pertence ao cadastro de pessoas do EasyFinance (`people.credit_limit`) e e apenas consultado pelo Forca de Vendas. Valores pagos, em aberto e titulos vencidos ficam no EasyFinance; o Forca usa esses dados somente para decidir a aprovacao, sem exibir o detalhe financeiro na tela.
+O limite de credito pertence ao cadastro de pessoas do EasyFinance (`people.credit_limit`) e e apenas consultado pelo EasySales. Valores pagos, em aberto e titulos vencidos ficam no EasyFinance; o EasySales usa esses dados somente para decidir a aprovacao, sem exibir o detalhe financeiro na tela.
 
-O cadastro **Perfis comerciais** classifica clientes como Novo, Bom, Excelente, Ruim, Inativo ou outros perfis cadastrados. Todo cliente usado pelo Forca de Vendas deve ter um perfil comercial informado. Cada perfil define:
+O cadastro **Perfis comerciais** classifica clientes como Novo, Bom, Excelente, Ruim, Inativo ou outros perfis cadastrados. Todo cliente usado pelo EasySales deve ter um perfil comercial informado. Cada perfil define:
 
 - Dias maximos sem movimentacao.
 - Dias tolerados para titulos vencidos.

@@ -1,5 +1,5 @@
 {
-  "name": "forca-vendas-frontend",
+  "name": "easysales-frontend",
   "private": true,
   "version": "0.1.0",
   "type": "module",
@@ -19,4 +19,3 @@
   },
   "devDependencies": {}
 }
-

@@ -59,7 +59,7 @@ from app.schemas import (
 
 settings = get_settings()
 app = FastAPI(
-    title="Forca de Vendas API",
+    title="EasySales API",
     version="0.1.0",
     description=(
         "Produto comercial separado, operando isolado ou integrado ao ecossistema Insights X. "
@@ -789,7 +789,7 @@ def build_order_items(db: Session, order: SalesOrder, table: PriceTable, payload
 
 @app.get("/health", tags=["Sistema"])
 def health():
-    return {"ok": True, "service": "forca-vendas", "customer_provider": settings.customer_provider}
+    return {"ok": True, "service": "easysales", "customer_provider": settings.customer_provider}
 
 
 @app.get("/customers", response_model=list[CustomerRead], tags=["Clientes"])

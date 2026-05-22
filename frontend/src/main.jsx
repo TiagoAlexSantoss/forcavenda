@@ -26,7 +26,7 @@ const MESSAGE_TYPES = {
 };
 
 const MESSAGES = {
-  apiUnavailable: "Nao foi possivel conectar na API do Forca de Vendas.",
+  apiUnavailable: "Nao foi possivel conectar na API do EasySales.",
   operationFailed: "Nao foi possivel concluir a operacao.",
   operationSuccess: "Operacao concluida com sucesso.",
   customers: {
@@ -112,7 +112,7 @@ function App() {
         <div className="brand">
           <Package size={24} />
           <div>
-            <strong>Forca de Vendas</strong>
+            <strong>EasySales</strong>
             <span>{health?.customer_provider === "easyfinance" ? "Integrado ao EasyFinance" : "Operacao independente"}</span>
           </div>
           <button type="button" className="sidebar-toggle" onClick={() => setSidebarCollapsed((value) => !value)} title="Recolher menu"><Menu size={22} /></button>
@@ -138,7 +138,7 @@ function App() {
         <header className="topbar">
           <div>
             <p>Produto separado</p>
-            <h1>Forca de Vendas</h1>
+            <h1>EasySales</h1>
           </div>
           <button className="secondary-button" onClick={loadAll}><RefreshCcw size={17} /> Atualizar</button>
         </header>
