@@ -22,17 +22,28 @@ select {
 
 .app-shell {
   min-height: 100vh;
-  display: grid;
-  grid-template-columns: 260px 1fr;
+  --sidebar-width: 260px;
+  --sidebar-collapsed-width: 74px;
 }
 
 .sidebar {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 10;
+  width: var(--sidebar-width);
   background: #18212f;
   color: #f8fafc;
   padding: 22px 16px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  overflow-y: auto;
+  transition: width 0.18s ease, padding 0.18s ease;
+}
+
+.sidebar-collapsed .sidebar {
+  width: var(--sidebar-collapsed-width);
+  padding: 18px 10px;
 }
 
 .brand {
@@ -53,6 +64,28 @@ select {
   margin-top: 3px;
 }
 
+.sidebar-toggle {
+  margin-left: auto;
+  width: 34px;
+  height: 34px;
+  justify-content: center;
+}
+
+.sidebar-collapsed .brand {
+  justify-content: center;
+  padding: 4px 0 14px;
+}
+
+.sidebar-collapsed .brand > div,
+.sidebar-collapsed .menu-section span,
+.sidebar-collapsed .sidebar button span {
+  display: none;
+}
+
+.sidebar-collapsed .sidebar-toggle {
+  margin-left: 0;
+}
+
 .sidebar button {
   border: 0;
   color: #cbd5e1;
@@ -66,6 +99,11 @@ select {
   text-align: left;
 }
 
+.sidebar-collapsed .sidebar button {
+  justify-content: center;
+  padding: 11px;
+}
+
 .sidebar button.active,
 .sidebar button:hover {
   color: #ffffff;
@@ -73,6 +111,7 @@ select {
 }
 
 .menu-section {
+  width: 100%;
   color: #7dd3fc;
   font-size: 11px;
   font-weight: 800;
@@ -82,7 +121,13 @@ select {
 }
 
 .workspace {
+  margin-left: var(--sidebar-width);
   padding: 28px;
+  transition: margin-left 0.18s ease;
+}
+
+.sidebar-collapsed .workspace {
+  margin-left: var(--sidebar-collapsed-width);
 }
 
 .topbar,
@@ -548,11 +593,11 @@ th {
   display: grid;
   grid-template-columns: repeat(3, minmax(120px, 1fr));
   gap: 10px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
 }
 
 .health-card {
-  padding: 12px;
+  padding: 10px 12px;
   border-radius: 8px;
   border: 1px solid #d9e2ec;
   background: #f8fafc;
@@ -560,9 +605,15 @@ th {
 }
 
 .health-card strong {
-  display: block;
-  font-size: 24px;
+  display: inline-block;
+  min-width: 34px;
+  font-size: 22px;
   color: #17202a;
+}
+
+.health-card small {
+  font-weight: 800;
+  text-transform: uppercase;
 }
 
 .health-card.critical {
@@ -582,13 +633,14 @@ th {
 
 .customer-health-list {
   display: grid;
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+  gap: 10px;
 }
 
 .customer-health {
   border: 1px solid #d9e2ec;
   border-radius: 8px;
-  padding: 14px;
+  padding: 12px;
   background: #ffffff;
 }
 
@@ -649,8 +701,32 @@ th {
 }
 
 .customer-health-metrics {
-  justify-content: flex-start;
-  margin: 12px 0;
+  justify-content: space-between;
+  margin: 10px 0;
+  padding: 8px;
+  border-radius: 7px;
+  background: #f8fafc;
+}
+
+.customer-health-metrics span {
+  display: grid;
+  gap: 2px;
+}
+
+.customer-health-metrics strong {
+  color: #17202a;
+}
+
+.customer-health-metrics small {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.compact-action {
+  min-height: 32px;
+  width: 100%;
+  justify-content: center;
+  margin-top: 2px;
 }
 
 .customer-alerts {
@@ -697,11 +773,17 @@ th {
 
 @media (max-width: 900px) {
   .app-shell {
-    grid-template-columns: 1fr;
+    --sidebar-width: 100%;
   }
 
   .sidebar {
     position: static;
+    width: 100%;
+  }
+
+  .workspace,
+  .sidebar-collapsed .workspace {
+    margin-left: 0;
   }
 
   .form-grid,

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Box, CheckCircle2, ClipboardList, Edit3, Layers3, Package, Plus, RefreshCcw, Send, Tags, Trash2, Users, X, XCircle } from "lucide-react";
+import { Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Edit3, Layers3, Menu, Package, Plus, RefreshCcw, Send, Tags, Trash2, Users, X, XCircle } from "lucide-react";
 import api from "./services/api";
 import "./styles.css";
 
@@ -43,6 +43,8 @@ function errorMessage(error, fallback = MESSAGES.operationFailed) {
 
 function App() {
   const [activeTab, setActiveTab] = useState("products");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [menuOpen, setMenuOpen] = useState({ cadastros: true, operacoes: true });
   const [health, setHealth] = useState(null);
   const [message, setMessage] = useState(null);
   const [customers, setCustomers] = useState([]);
@@ -104,7 +106,7 @@ function App() {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar">
         <div className="brand">
           <Package size={24} />
@@ -112,20 +114,23 @@ function App() {
             <strong>Forca de Vendas</strong>
             <span>{health?.customer_provider === "easyfinance" ? "Integrado ao EasyFinance" : "Operacao independente"}</span>
           </div>
+          <button type="button" className="sidebar-toggle" onClick={() => setSidebarCollapsed((value) => !value)} title="Recolher menu"><Menu size={18} /></button>
         </div>
 
-        <div className="menu-section">Cadastros</div>
-        <NavButton active={activeTab === "products"} onClick={() => openTab("products")} icon={Box} label="Produtos" />
-        <NavButton active={activeTab === "priceTables"} onClick={() => openTab("priceTables")} icon={Tags} label="Tabelas de preco" />
-        <NavButton active={activeTab === "groups"} onClick={() => openTab("groups")} icon={Layers3} label="Grupos" />
-        <NavButton active={activeTab === "classes"} onClick={() => openTab("classes")} icon={Layers3} label="Classes" />
-        <NavButton active={activeTab === "customers"} onClick={() => openTab("customers")} icon={Users} label="Clientes" />
-        <NavButton active={activeTab === "customerProfiles"} onClick={() => openTab("customerProfiles")} icon={Users} label="Perfis comerciais" />
+        <MenuGroup title="Cadastros" open={menuOpen.cadastros} collapsed={sidebarCollapsed} onToggle={() => setMenuOpen((current) => ({ ...current, cadastros: !current.cadastros }))}>
+          <NavButton active={activeTab === "products"} onClick={() => openTab("products")} icon={Box} label="Produtos" />
+          <NavButton active={activeTab === "priceTables"} onClick={() => openTab("priceTables")} icon={Tags} label="Tabelas de preco" />
+          <NavButton active={activeTab === "groups"} onClick={() => openTab("groups")} icon={Layers3} label="Grupos" />
+          <NavButton active={activeTab === "classes"} onClick={() => openTab("classes")} icon={Layers3} label="Classes" />
+          <NavButton active={activeTab === "customers"} onClick={() => openTab("customers")} icon={Users} label="Clientes" />
+          <NavButton active={activeTab === "customerProfiles"} onClick={() => openTab("customerProfiles")} icon={Users} label="Perfis comerciais" />
+        </MenuGroup>
 
-        <div className="menu-section">Operacoes</div>
-        <NavButton active={activeTab === "orders"} onClick={() => openTab("orders")} icon={ClipboardList} label="Pedidos" />
-        <NavButton active={activeTab === "customerManagement"} onClick={() => openTab("customerManagement")} icon={Users} label="Gestao clientes" />
-        <NavButton active={activeTab === "approvals"} onClick={() => openTab("approvals")} icon={CheckCircle2} label="Autorizacoes" />
+        <MenuGroup title="Operacoes" open={menuOpen.operacoes} collapsed={sidebarCollapsed} onToggle={() => setMenuOpen((current) => ({ ...current, operacoes: !current.operacoes }))}>
+          <NavButton active={activeTab === "orders"} onClick={() => openTab("orders")} icon={ClipboardList} label="Pedidos" />
+          <NavButton active={activeTab === "customerManagement"} onClick={() => openTab("customerManagement")} icon={Users} label="Gestao clientes" />
+          <NavButton active={activeTab === "approvals"} onClick={() => openTab("approvals")} icon={CheckCircle2} label="Autorizacoes" />
+        </MenuGroup>
       </aside>
 
       <main className="workspace">
@@ -153,8 +158,20 @@ function App() {
   );
 }
 
+function MenuGroup({ title, open, collapsed, onToggle, children }) {
+  return (
+    <div className="menu-group">
+      <button type="button" className="menu-section" onClick={onToggle} title={title}>
+        {open ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+        <span>{title}</span>
+      </button>
+      {(open || collapsed) && <div className="menu-items">{children}</div>}
+    </div>
+  );
+}
+
 function NavButton({ active, onClick, icon: Icon, label }) {
-  return <button className={active ? "active" : ""} onClick={onClick}><Icon size={18} /> {label}</button>;
+  return <button className={active ? "active" : ""} onClick={onClick} title={label}><Icon size={18} /> <span>{label}</span></button>;
 }
 
 function ProductsBrowser({ products, groups, classes, run }) {
@@ -545,6 +562,7 @@ function CustomersBrowser({ customers, customerProfiles, run }) {
 
 function CustomerManagementPage({ rows, run }) {
   const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState({});
   const filtered = useMemo(() => filterRows(rows, query, ["customer_name", "current_profile_name", "suggested_profile_name", "health_status"]), [rows, query]);
   const summary = {
     critical: rows.filter((row) => row.health_status === "critical").length,
@@ -555,6 +573,10 @@ function CustomerManagementPage({ rows, run }) {
   function applySuggestion(row) {
     const [source, externalId] = row.customer_id.split(":");
     return run(() => api.post(`/customer-monitoring/${source}/${externalId}/apply-suggested-profile`));
+  }
+
+  function toggle(customerId) {
+    setExpanded((current) => ({ ...current, [customerId]: !current[customerId] }));
   }
 
   return (
@@ -569,9 +591,9 @@ function CustomerManagementPage({ rows, run }) {
         </div>
       </div>
       <div className="health-summary">
-        <span className="health-card critical"><strong>{summary.critical}</strong> Criticos</span>
-        <span className="health-card attention"><strong>{summary.attention}</strong> Atencao</span>
-        <span className="health-card healthy"><strong>{summary.healthy}</strong> Saudaveis</span>
+        <span className="health-card critical"><strong>{summary.critical}</strong><small>Criticos</small></span>
+        <span className="health-card attention"><strong>{summary.attention}</strong><small>Atencao</small></span>
+        <span className="health-card healthy"><strong>{summary.healthy}</strong><small>Saudaveis</small></span>
       </div>
       <div className="customer-health-list">
         {filtered.map((row) => (
@@ -579,30 +601,33 @@ function CustomerManagementPage({ rows, run }) {
             <header>
               <div>
                 <strong>{row.customer_name}</strong>
-                <span>{row.source} | Perfil atual: {row.current_profile_name || "-"}</span>
+                <span>{row.current_profile_name || "Sem perfil"} {"->"} {row.suggested_profile_name || "-"}</span>
               </div>
               <div className="customer-health-actions">
                 <span className={`health-pill ${row.health_status}`}>{healthStatusLabel(row.health_status)}</span>
-                {row.suggested_profile_id && row.suggested_profile_id !== row.current_profile_id && (
-                  <button type="button" className="secondary-button" onClick={() => applySuggestion(row)}>Aplicar {row.suggested_profile_name}</button>
-                )}
+                <button type="button" className="link-button" onClick={() => toggle(row.customer_id)}>{expanded[row.customer_id] ? "Recolher" : "Detalhes"}</button>
               </div>
             </header>
             <div className="customer-health-metrics">
-              <span>Sem movimentacao: <strong>{row.days_without_movement ?? "sem historico"}</strong></span>
-              <span>Maior atraso: <strong>{row.oldest_overdue_days} dia(s)</strong></span>
-              <span>Perfil sugerido: <strong>{row.suggested_profile_name || "-"}</strong></span>
+              <span><strong>{row.days_without_movement ?? "-"}</strong><small>dias sem mov.</small></span>
+              <span><strong>{row.oldest_overdue_days}</strong><small>dias atraso</small></span>
+              <span><strong>{row.alerts.length}</strong><small>alertas</small></span>
             </div>
-            <div className="customer-alerts">
-              {row.alerts.map((alert, index) => (
-                <div className={`customer-alert ${alert.severity}`} key={`${row.customer_id}-${index}`}>
-                  <strong>{alert.segment === "financial" ? "Financeiro" : "Comercial"}</strong>
-                  <span>{alert.message}</span>
-                  {alert.suggested_action && <small>{alert.suggested_action}</small>}
-                </div>
-              ))}
-              {row.alerts.length === 0 && <div className="customer-alert healthy"><strong>Carteira em ordem</strong><span>Nenhum alerta para este cliente.</span></div>}
-            </div>
+            {row.suggested_profile_id && row.suggested_profile_id !== row.current_profile_id && (
+              <button type="button" className="secondary-button compact-action" onClick={() => applySuggestion(row)}>Aplicar perfil {row.suggested_profile_name}</button>
+            )}
+            {expanded[row.customer_id] && (
+              <div className="customer-alerts">
+                {row.alerts.map((alert, index) => (
+                  <div className={`customer-alert ${alert.severity}`} key={`${row.customer_id}-${index}`}>
+                    <strong>{alert.segment === "financial" ? "Financeiro" : "Comercial"}</strong>
+                    <span>{alert.message}</span>
+                    {alert.suggested_action && <small>{alert.suggested_action}</small>}
+                  </div>
+                ))}
+                {row.alerts.length === 0 && <div className="customer-alert healthy"><strong>Carteira em ordem</strong><span>Nenhum alerta para este cliente.</span></div>}
+              </div>
+            )}
           </article>
         ))}
         {filtered.length === 0 && <div className="empty-detail">Nenhum cliente encontrado.</div>}
