@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Edit3, Layers3, Menu, Package, Plus, RefreshCcw, Send, Tags, Trash2, Users, X, XCircle } from "lucide-react";
+import { Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Edit3, HelpCircle, Layers3, Menu, Package, Plus, RefreshCcw, Send, Tags, Trash2, Users, X, XCircle } from "lucide-react";
 import api from "./services/api";
 import "./styles.css";
 
@@ -842,12 +842,26 @@ function AuthorizationReasons({ reasons, order, segment, commercialActionButtons
   );
 }
 
+function priceCorrectionHelp(preview) {
+  if (!preview) return null;
+  const mode = preview.correction_mode === "inside" ? "por dentro" : "por fora";
+  const basePrice = Number(preview.base_price || 0);
+  const correctedPrice = Number(preview.corrected_price || 0);
+  const factor = Number(preview.correction_factor || 0);
+  return {
+    mode,
+    example: `${money.format(basePrice)} x fator ${decimal.format(factor)} = ${money.format(correctedPrice)}`,
+    detail: `O fator considera ${preview.days} dias entre a data base da tabela e o prazo de pagamento do pedido, com correcao ${mode}.`,
+  };
+}
+
 function OrderModal({ state, setState, customers, products, priceTables, run, onSave }) {
   const { item, form } = state;
   const [currentOrder, setCurrentOrder] = useState(item);
   const [itemForm, setItemForm] = useState(emptyOrderItem);
   const [editingItem, setEditingItem] = useState(null);
   const [preview, setPreview] = useState(null);
+  const correctionHelp = priceCorrectionHelp(preview);
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
 
   useEffect(() => {
@@ -983,7 +997,19 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
 
         <div className="price-preview">
           <strong>{preview ? money.format(Number(preview.corrected_price || 0)) : "-"}</strong>
-          <span>{preview ? `${preview.days} dias, ${preview.correction_mode === "inside" ? "por dentro" : "por fora"}` : "Preco corrigido"}</span>
+          <div className="price-preview-meta">
+            <span>{preview ? `${preview.days} dias, ${preview.correction_mode === "inside" ? "por dentro" : "por fora"}` : "Preco corrigido"}</span>
+            {correctionHelp && (
+              <button type="button" className="help-tip" aria-label="Entenda o calculo do preco corrigido">
+                <HelpCircle size={15} />
+                <span className="help-bubble">
+                  <strong>Entenda o calculo</strong>
+                  <span>{correctionHelp.example}</span>
+                  <small>{correctionHelp.detail}</small>
+                </span>
+              </button>
+            )}
+          </div>
         </div>
       </section>
     </Modal>

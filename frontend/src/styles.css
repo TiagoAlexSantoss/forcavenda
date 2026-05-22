@@ -294,15 +294,92 @@ select {
   background: #ffffff;
 }
 
-.price-preview strong,
-.price-preview span {
+.price-preview strong {
   display: block;
 }
 
-.price-preview span {
+.price-preview-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   color: #64748b;
   font-size: 12px;
   margin-top: 2px;
+}
+
+.help-tip {
+  position: relative;
+  border: 0;
+  background: transparent;
+  color: #64748b;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: help;
+}
+
+.help-tip:hover,
+.help-tip:focus-visible {
+  color: #0f766e;
+}
+
+.help-bubble {
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 8px);
+  transform: translateX(-50%);
+  width: min(330px, 78vw);
+  display: none;
+  flex-direction: column;
+  gap: 5px;
+  z-index: 40;
+  padding: 10px 12px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 14px 30px rgba(15, 23, 42, 0.16);
+  color: #17202a;
+  text-align: left;
+  line-height: 1.35;
+}
+
+.help-bubble::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  bottom: -6px;
+  width: 10px;
+  height: 10px;
+  transform: translateX(-50%) rotate(45deg);
+  border-right: 1px solid #cbd5e1;
+  border-bottom: 1px solid #cbd5e1;
+  background: #ffffff;
+}
+
+.help-bubble strong,
+.help-bubble span,
+.help-bubble small {
+  display: block;
+}
+
+.help-bubble strong {
+  color: #0f172a;
+  font-size: 12px;
+}
+
+.help-bubble span,
+.help-bubble small {
+  color: #475569;
+  font-size: 12px;
+}
+
+.help-tip:hover .help-bubble,
+.help-tip:focus-visible .help-bubble {
+  display: flex;
 }
 
 .primary-button,
