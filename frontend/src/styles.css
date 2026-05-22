@@ -329,10 +329,9 @@ select {
 
 .help-bubble {
   position: absolute;
-  left: 50%;
+  left: -8px;
   bottom: calc(100% + 8px);
-  transform: translateX(-50%);
-  width: min(330px, 78vw);
+  width: min(360px, calc(100vw - 40px));
   display: none;
   flex-direction: column;
   gap: 5px;
@@ -350,11 +349,11 @@ select {
 .help-bubble::after {
   content: "";
   position: absolute;
-  left: 50%;
+  left: 14px;
   bottom: -6px;
   width: 10px;
   height: 10px;
-  transform: translateX(-50%) rotate(45deg);
+  transform: rotate(45deg);
   border-right: 1px solid #cbd5e1;
   border-bottom: 1px solid #cbd5e1;
   background: #ffffff;
@@ -546,7 +545,7 @@ th {
 }
 
 .modal {
-  width: min(980px, 100%);
+  width: min(1180px, 100%);
   max-height: calc(100vh - 48px);
   overflow: auto;
   background: #ffffff;
