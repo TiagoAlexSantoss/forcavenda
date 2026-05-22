@@ -544,6 +544,157 @@ th {
   color: #64748b;
 }
 
+.health-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.health-card {
+  padding: 12px;
+  border-radius: 8px;
+  border: 1px solid #d9e2ec;
+  background: #f8fafc;
+  color: #475569;
+}
+
+.health-card strong {
+  display: block;
+  font-size: 24px;
+  color: #17202a;
+}
+
+.health-card.critical {
+  border-color: #fecaca;
+  background: #fef2f2;
+}
+
+.health-card.attention {
+  border-color: #fed7aa;
+  background: #fff7ed;
+}
+
+.health-card.healthy {
+  border-color: #bbf7d0;
+  background: #ecfdf5;
+}
+
+.customer-health-list {
+  display: grid;
+  gap: 12px;
+}
+
+.customer-health {
+  border: 1px solid #d9e2ec;
+  border-radius: 8px;
+  padding: 14px;
+  background: #ffffff;
+}
+
+.customer-health.critical {
+  border-left: 5px solid #dc2626;
+}
+
+.customer-health.attention {
+  border-left: 5px solid #f97316;
+}
+
+.customer-health.healthy {
+  border-left: 5px solid #16a34a;
+}
+
+.customer-health header,
+.customer-health-actions,
+.customer-health-metrics {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.customer-health header span,
+.customer-health-metrics span {
+  color: #64748b;
+  font-size: 13px;
+}
+
+.customer-health-actions {
+  justify-content: flex-end;
+}
+
+.health-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.health-pill.critical {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.health-pill.attention {
+  background: #ffedd5;
+  color: #9a3412;
+}
+
+.health-pill.healthy {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.customer-health-metrics {
+  justify-content: flex-start;
+  margin: 12px 0;
+}
+
+.customer-alerts {
+  display: grid;
+  gap: 8px;
+}
+
+.customer-alert {
+  padding: 10px;
+  border-radius: 7px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+}
+
+.customer-alert strong,
+.customer-alert span,
+.customer-alert small {
+  display: block;
+}
+
+.customer-alert span {
+  margin-top: 3px;
+}
+
+.customer-alert small {
+  margin-top: 4px;
+  color: #64748b;
+}
+
+.customer-alert.critical {
+  background: #fef2f2;
+  border-color: #fecaca;
+}
+
+.customer-alert.warning {
+  background: #fff7ed;
+  border-color: #fed7aa;
+}
+
+.customer-alert.healthy {
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+}
+
 @media (max-width: 900px) {
   .app-shell {
     grid-template-columns: 1fr;
@@ -558,11 +709,15 @@ th {
   .modal-grid,
   .detail-form,
   .order-summary,
-  .authorization-reason {
+  .authorization-reason,
+  .health-summary {
     grid-template-columns: 1fr;
   }
 
-  .authorization-reason {
+  .authorization-reason,
+  .customer-health header,
+  .customer-health-actions,
+  .customer-health-metrics {
     align-items: stretch;
     flex-direction: column;
   }

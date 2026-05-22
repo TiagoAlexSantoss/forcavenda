@@ -144,6 +144,27 @@ class CustomerProfileAssign(BaseModel):
     customer_profile_id: int
 
 
+class CustomerAlertRead(BaseModel):
+    segment: str
+    severity: str
+    message: str
+    suggested_action: str | None = None
+
+
+class CustomerMonitoringRead(BaseModel):
+    customer_id: str
+    customer_name: str
+    source: str
+    current_profile_id: int | None = None
+    current_profile_name: str | None = None
+    suggested_profile_id: int | None = None
+    suggested_profile_name: str | None = None
+    health_status: str
+    days_without_movement: int | None = None
+    oldest_overdue_days: int = 0
+    alerts: list[CustomerAlertRead] = Field(default_factory=list)
+
+
 class PriceTableBase(BaseModel):
     code: str
     name: str

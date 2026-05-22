@@ -52,6 +52,7 @@ function App() {
   const [products, setProducts] = useState([]);
   const [priceTables, setPriceTables] = useState([]);
   const [orders, setOrders] = useState([]);
+  const [customerMonitoring, setCustomerMonitoring] = useState([]);
 
   useEffect(() => {
     loadAll();
@@ -59,9 +60,10 @@ function App() {
 
   async function loadAll() {
     try {
-      const [healthRes, customersRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes] = await Promise.all([
+      const [healthRes, customersRes, monitoringRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes] = await Promise.all([
         api.get("/health"),
         api.get("/customers"),
+        api.get("/customer-monitoring"),
         api.get("/customer-profiles"),
         api.get("/product-groups"),
         api.get("/product-classes"),
@@ -71,6 +73,7 @@ function App() {
       ]);
       setHealth(healthRes.data);
       setCustomers(customersRes.data);
+      setCustomerMonitoring(monitoringRes.data);
       setCustomerProfiles(profilesRes.data);
       setGroups(groupsRes.data);
       setClasses(classesRes.data);
@@ -121,6 +124,7 @@ function App() {
 
         <div className="menu-section">Operacoes</div>
         <NavButton active={activeTab === "orders"} onClick={() => openTab("orders")} icon={ClipboardList} label="Pedidos" />
+        <NavButton active={activeTab === "customerManagement"} onClick={() => openTab("customerManagement")} icon={Users} label="Gestao clientes" />
         <NavButton active={activeTab === "approvals"} onClick={() => openTab("approvals")} icon={CheckCircle2} label="Autorizacoes" />
       </aside>
 
@@ -142,6 +146,7 @@ function App() {
         {activeTab === "customers" && <CustomersBrowser customers={customers} customerProfiles={customerProfiles} run={run} />}
         {activeTab === "customerProfiles" && <CustomerProfilesBrowser profiles={customerProfiles} run={run} />}
         {activeTab === "orders" && <OrdersBrowser orders={orders} customers={customers} products={products} priceTables={priceTables} run={run} />}
+        {activeTab === "customerManagement" && <CustomerManagementPage rows={customerMonitoring} run={run} />}
         {activeTab === "approvals" && <OrderApprovalsPage orders={orders} run={run} />}
       </main>
     </div>
@@ -535,6 +540,74 @@ function CustomersBrowser({ customers, customerProfiles, run }) {
       })} />
       {modal && <CustomerModal state={modal} setState={setModal} customerProfiles={customerProfiles} onSave={save} run={run} />}
     </Browser>
+  );
+}
+
+function CustomerManagementPage({ rows, run }) {
+  const [query, setQuery] = useState("");
+  const filtered = useMemo(() => filterRows(rows, query, ["customer_name", "current_profile_name", "suggested_profile_name", "health_status"]), [rows, query]);
+  const summary = {
+    critical: rows.filter((row) => row.health_status === "critical").length,
+    attention: rows.filter((row) => row.health_status === "attention").length,
+    healthy: rows.filter((row) => row.health_status === "healthy").length,
+  };
+
+  function applySuggestion(row) {
+    const [source, externalId] = row.customer_id.split(":");
+    return run(() => api.post(`/customer-monitoring/${source}/${externalId}/apply-suggested-profile`));
+  }
+
+  return (
+    <section className="panel">
+      <div className="browser-header">
+        <div>
+          <p>Operacoes</p>
+          <h2>Gestao de clientes</h2>
+        </div>
+        <div className="browser-actions">
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar cliente, perfil, status..." />
+        </div>
+      </div>
+      <div className="health-summary">
+        <span className="health-card critical"><strong>{summary.critical}</strong> Criticos</span>
+        <span className="health-card attention"><strong>{summary.attention}</strong> Atencao</span>
+        <span className="health-card healthy"><strong>{summary.healthy}</strong> Saudaveis</span>
+      </div>
+      <div className="customer-health-list">
+        {filtered.map((row) => (
+          <article className={`customer-health ${row.health_status}`} key={row.customer_id}>
+            <header>
+              <div>
+                <strong>{row.customer_name}</strong>
+                <span>{row.source} | Perfil atual: {row.current_profile_name || "-"}</span>
+              </div>
+              <div className="customer-health-actions">
+                <span className={`health-pill ${row.health_status}`}>{healthStatusLabel(row.health_status)}</span>
+                {row.suggested_profile_id && row.suggested_profile_id !== row.current_profile_id && (
+                  <button type="button" className="secondary-button" onClick={() => applySuggestion(row)}>Aplicar {row.suggested_profile_name}</button>
+                )}
+              </div>
+            </header>
+            <div className="customer-health-metrics">
+              <span>Sem movimentacao: <strong>{row.days_without_movement ?? "sem historico"}</strong></span>
+              <span>Maior atraso: <strong>{row.oldest_overdue_days} dia(s)</strong></span>
+              <span>Perfil sugerido: <strong>{row.suggested_profile_name || "-"}</strong></span>
+            </div>
+            <div className="customer-alerts">
+              {row.alerts.map((alert, index) => (
+                <div className={`customer-alert ${alert.severity}`} key={`${row.customer_id}-${index}`}>
+                  <strong>{alert.segment === "financial" ? "Financeiro" : "Comercial"}</strong>
+                  <span>{alert.message}</span>
+                  {alert.suggested_action && <small>{alert.suggested_action}</small>}
+                </div>
+              ))}
+              {row.alerts.length === 0 && <div className="customer-alert healthy"><strong>Carteira em ordem</strong><span>Nenhum alerta para este cliente.</span></div>}
+            </div>
+          </article>
+        ))}
+        {filtered.length === 0 && <div className="empty-detail">Nenhum cliente encontrado.</div>}
+      </div>
+    </section>
   );
 }
 
@@ -979,6 +1052,15 @@ function commercialStatusLabel(status) {
     rejected: "Rejeitado",
   };
   return labels[status] || status || "-";
+}
+
+function healthStatusLabel(status) {
+  const labels = {
+    critical: "Critico",
+    attention: "Atencao",
+    healthy: "Saudavel",
+  };
+  return labels[status] || status;
 }
 
 function DataTable({ columns, rows }) {

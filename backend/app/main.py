@@ -22,6 +22,7 @@ from app.models import (
 )
 from app.schemas import (
     CustomerCreate,
+    CustomerMonitoringRead,
     CustomerProfileAssign,
     CustomerProfileCreate,
     CustomerProfileRead,
@@ -165,6 +166,83 @@ def customer_link_for(db: Session, source: str, external_id: str) -> CustomerLin
 def customer_profile_name(db: Session, profile_id: int | None) -> str | None:
     profile = db.get(CustomerProfile, profile_id) if profile_id else None
     return profile.name if profile else None
+
+
+def profile_by_code(db: Session, code: str) -> CustomerProfile | None:
+    return db.scalar(select(CustomerProfile).where(CustomerProfile.code == code))
+
+
+def customer_monitoring_row(
+    db: Session,
+    customer_id: str,
+    source: str,
+    external_id: str,
+    name: str,
+    current_profile_id: int | None,
+) -> dict:
+    alerts = []
+    current_profile = db.get(CustomerProfile, current_profile_id) if current_profile_id else None
+    suggested_profile = current_profile
+    financial = easyfinance_customer_financial(db, external_id) if source == "easyfinance" else {
+        "oldest_overdue_days": 0,
+        "days_without_movement": None,
+    }
+    days_without_movement = financial["days_without_movement"]
+    oldest_overdue_days = financial["oldest_overdue_days"]
+
+    if days_without_movement is None:
+        alerts.append({
+            "segment": "commercial",
+            "severity": "warning",
+            "message": "Cliente sem historico de movimentacao financeira.",
+            "suggested_action": "Classificar como Novo ate criar historico.",
+        })
+        suggested_profile = profile_by_code(db, "NOVO") or suggested_profile
+    elif current_profile and days_without_movement > current_profile.max_inactive_days:
+        alerts.append({
+            "segment": "commercial",
+            "severity": "critical" if current_profile.block_without_movement else "warning",
+            "message": f"Cliente sem movimentacao ha {days_without_movement} dia(s), acima do perfil atual.",
+            "suggested_action": "Revisar abordagem comercial e considerar perfil Inativo.",
+        })
+        suggested_profile = profile_by_code(db, "INATIVO") or suggested_profile
+
+    if current_profile and oldest_overdue_days > current_profile.max_overdue_days:
+        alerts.append({
+            "segment": "financial",
+            "severity": "critical" if current_profile.block_overdue_titles else "warning",
+            "message": f"Cliente possui titulo vencido ha {oldest_overdue_days} dia(s), acima da tolerancia do perfil.",
+            "suggested_action": "Acionar financeiro antes de nova venda e considerar perfil Ruim.",
+        })
+        suggested_profile = profile_by_code(db, "RUIM") or suggested_profile
+
+    if not current_profile:
+        alerts.append({
+            "segment": "commercial",
+            "severity": "critical",
+            "message": "Cliente sem perfil comercial definido.",
+            "suggested_action": "Definir perfil para permitir operacao comercial.",
+        })
+        suggested_profile = profile_by_code(db, "NOVO") or suggested_profile
+
+    if alerts:
+        health_status = "critical" if any(row["severity"] == "critical" for row in alerts) else "attention"
+    else:
+        health_status = "healthy"
+
+    return {
+        "customer_id": customer_id,
+        "customer_name": name,
+        "source": source,
+        "current_profile_id": current_profile.id if current_profile else None,
+        "current_profile_name": current_profile.name if current_profile else None,
+        "suggested_profile_id": suggested_profile.id if suggested_profile else None,
+        "suggested_profile_name": suggested_profile.name if suggested_profile else None,
+        "health_status": health_status,
+        "days_without_movement": days_without_movement,
+        "oldest_overdue_days": oldest_overdue_days,
+        "alerts": alerts,
+    }
 
 
 def get_group_or_404(db: Session, group_id: int | None) -> ProductGroup | None:
@@ -843,6 +921,49 @@ def assign_customer_profile(source: str, external_id: str, payload: CustomerProf
     db.commit()
     db.refresh(link)
     return next(row for row in list_customers(db) if row["id"] == f"{source}:{external_id}")
+
+
+@app.get("/customer-monitoring", response_model=list[CustomerMonitoringRead], tags=["Clientes"])
+def customer_monitoring(db: Session = Depends(get_db)):
+    rows = []
+    for customer in list_customers(db):
+        source, _, external_id = customer["id"].partition(":")
+        rows.append(
+            customer_monitoring_row(
+                db,
+                customer["id"],
+                source,
+                external_id,
+                customer["name"],
+                customer["customer_profile_id"],
+            )
+        )
+    rows.sort(key=lambda item: {"critical": 0, "attention": 1, "healthy": 2}[item["health_status"]])
+    return rows
+
+
+@app.post("/customer-monitoring/{source}/{external_id}/apply-suggested-profile", response_model=CustomerRead, tags=["Clientes"])
+def apply_suggested_customer_profile(source: str, external_id: str, db: Session = Depends(get_db)):
+    customer_id = f"{source}:{external_id}"
+    customer = next((row for row in list_customers(db) if row["id"] == customer_id), None)
+    if not customer:
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado")
+    suggestion = customer_monitoring_row(
+        db,
+        customer_id,
+        source,
+        external_id,
+        customer["name"],
+        customer["customer_profile_id"],
+    )
+    if not suggestion["suggested_profile_id"]:
+        raise HTTPException(status_code=400, detail="Cliente sem perfil sugerido")
+    return assign_customer_profile(
+        source,
+        external_id,
+        CustomerProfileAssign(customer_profile_id=suggestion["suggested_profile_id"]),
+        db,
+    )
 
 
 @app.get("/product-groups", response_model=list[ProductGroupRead], tags=["Produtos"])

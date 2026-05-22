@@ -69,6 +69,19 @@ Cada item da tabela de preco tem uma margem percentual, iniciando em `5%` por pa
 
 O pedido tambem aceita cancelamento integral ou parcial por item. Quando a quantidade cancelada de todos os itens zera o saldo do pedido, o pedido inteiro passa para `cancelled`.
 
+## Gestao de clientes
+
+A tela **Gestao de clientes** faz uma varredura da carteira e aponta alertas por cliente. Nesta primeira versao, ela cruza perfil comercial, dias sem movimentacao e inadimplencia para sugerir reclassificacao de perfil.
+
+Alertas atuais:
+
+- Cliente sem perfil comercial.
+- Cliente sem historico de movimentacao.
+- Cliente sem movimentacao acima da tolerancia do perfil atual.
+- Cliente com titulo vencido acima da tolerancia do perfil atual.
+
+A tela mostra status visual da carteira (`Critico`, `Atencao`, `Saudavel`) e permite aplicar o perfil sugerido. A estrutura foi criada para evoluir depois para CRM, historico de relacionamento, responsaveis por carteira e camada de IA para explicar comportamento e sugerir proximas acoes.
+
 ## Swagger / Endpoints
 
 Com o backend rodando, acesse:
@@ -81,6 +94,7 @@ Grupos publicados no Swagger:
 
 - Sistema: `GET /health`.
 - Clientes: `GET /customers`, `POST /customers`, `PUT /customers/{customer_id}`, `DELETE /customers/{customer_id}`.
+- Gestao de clientes: `GET /customer-monitoring` e `POST /customer-monitoring/{source}/{external_id}/apply-suggested-profile`.
 - Perfis comerciais: `GET/POST /customer-profiles`, `PUT/DELETE /customer-profiles/{profile_id}`.
 - Produtos: grupos, classes e produtos.
 - Tabelas de preco: cabecalho, itens e `GET /price-preview`.
