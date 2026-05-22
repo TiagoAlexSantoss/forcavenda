@@ -842,16 +842,21 @@ function AuthorizationReasons({ reasons, order, segment, commercialActionButtons
   );
 }
 
-function priceCorrectionHelp(preview) {
+function priceCorrectionHelp(preview, priceTable) {
   if (!preview) return null;
   const mode = preview.correction_mode === "inside" ? "por dentro" : "por fora";
   const basePrice = Number(preview.base_price || 0);
   const correctedPrice = Number(preview.corrected_price || 0);
   const factor = Number(preview.correction_factor || 0);
+  const monthlyRate = Number(priceTable?.monthly_rate || 0);
+  const periodRate = (monthlyRate / 100) * (Number(preview.days || 0) / 30);
+  const factorFormula = preview.correction_mode === "inside"
+    ? `1 / (1 - ${decimal.format(periodRate)}) = ${decimal.format(factor)}`
+    : `1 + ${decimal.format(periodRate)} = ${decimal.format(factor)}`;
   return {
-    mode,
+    factorFormula,
     example: `${money.format(basePrice)} x fator ${decimal.format(factor)} = ${money.format(correctedPrice)}`,
-    detail: `O fator considera ${preview.days} dias entre a data base da tabela e o prazo de pagamento do pedido, com correcao ${mode}.`,
+    detail: `Taxa do periodo: ${decimal.format(monthlyRate)}% ao mes x ${preview.days} dias / 30 = ${decimal.format(periodRate)}. Como a correcao e ${mode}, o fator fica ${factorFormula}.`,
   };
 }
 
@@ -861,7 +866,8 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
   const [itemForm, setItemForm] = useState(emptyOrderItem);
   const [editingItem, setEditingItem] = useState(null);
   const [preview, setPreview] = useState(null);
-  const correctionHelp = priceCorrectionHelp(preview);
+  const selectedPriceTable = priceTables.find((table) => Number(table.id) === Number(form.price_table_id));
+  const correctionHelp = priceCorrectionHelp(preview, selectedPriceTable);
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
 
   useEffect(() => {
@@ -1004,6 +1010,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
                 <HelpCircle size={15} />
                 <span className="help-bubble">
                   <strong>Entenda o calculo</strong>
+                  <span>Fator: {correctionHelp.factorFormula}</span>
                   <span>{correctionHelp.example}</span>
                   <small>{correctionHelp.detail}</small>
                 </span>
