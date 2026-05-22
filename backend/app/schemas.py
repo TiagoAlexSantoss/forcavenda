@@ -204,11 +204,34 @@ class PriceTableItemUpdate(PriceTableItemBase):
     pass
 
 
+class PriceTableItemTierBase(BaseModel):
+    min_quantity: Decimal
+    discount_percent: Decimal = Decimal("0.00")
+    active: bool = True
+
+
+class PriceTableItemTierCreate(PriceTableItemTierBase):
+    pass
+
+
+class PriceTableItemTierUpdate(PriceTableItemTierBase):
+    pass
+
+
+class PriceTableItemTierRead(PriceTableItemTierBase):
+    id: int
+    price_table_item_id: int
+
+    class Config:
+        from_attributes = True
+
+
 class PriceTableItemRead(PriceTableItemBase):
     id: int
     price_table_id: int
     product_sku: str | None = None
     product_name: str | None = None
+    tiers: list[PriceTableItemTierRead] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -222,6 +245,10 @@ class PricePreviewRead(BaseModel):
     correction_mode: str
     correction_factor: Decimal
     days: int
+    quantity: Decimal = Decimal("1.00")
+    progressive_discount_percent: Decimal = Decimal("0.00")
+    progressive_tier_min_quantity: Decimal | None = None
+    price_before_progressive_discount: Decimal | None = None
 
 
 class SalesOrderItemCreate(BaseModel):

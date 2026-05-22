@@ -113,6 +113,18 @@ class PriceTableItem(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class PriceTableItemTier(Base):
+    __tablename__ = "sf_price_table_item_tiers"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    price_table_item_id: Mapped[int] = mapped_column(ForeignKey("sf_price_table_items.id"), index=True, nullable=False)
+    min_quantity: Mapped[Decimal] = mapped_column(Numeric(14, 4), nullable=False)
+    discount_percent: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class SalesOrder(Base):
     __tablename__ = "sf_sales_orders"
 

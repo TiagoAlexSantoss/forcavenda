@@ -595,6 +595,30 @@ th {
   margin-bottom: 14px;
 }
 
+.nested-detail {
+  margin-top: 14px;
+  padding: 14px;
+  border: 1px solid #d9e2ec;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.panel-header.compact {
+  margin-bottom: 10px;
+}
+
+.tier-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr auto auto;
+  gap: 12px;
+  align-items: end;
+  padding: 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  margin-bottom: 12px;
+}
+
 .empty-detail {
   padding: 18px;
   border: 1px dashed #cbd5e1;
@@ -868,6 +892,7 @@ th {
   .form-grid.compact,
   .modal-grid,
   .detail-form,
+  .tier-form,
   .order-summary,
   .authorization-reason,
   .health-summary {

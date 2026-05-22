@@ -16,6 +16,7 @@ const emptyClass = { product_group_id: "", code: "", name: "", description: "", 
 const emptyProduct = { product_group_id: "", product_class_id: "", sku: "", name: "", unit: "UN", purchase_price: "0.00", cost_price: "0.00", sale_price: "0.00", description: "", active: true };
 const emptyPriceTable = { code: "", name: "", correction_mode: "outside", monthly_rate: "0.00", base_date: today, active: true };
 const emptyPriceItem = { product_id: "", base_price: "0.00", margin_percent: "5.00", active: true };
+const emptyPriceTier = { min_quantity: "1.00", discount_percent: "0.00", active: true };
 const emptyOrder = { customer_id: "", price_table_id: "", order_date: today, payment_due_date: today, notes: "" };
 const emptyOrderItem = { product_id: "", quantity: "1", negotiated_unit_price: "" };
 
@@ -275,6 +276,9 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
   const [items, setItems] = useState([]);
   const [itemForm, setItemForm] = useState(emptyPriceItem);
   const [editingItem, setEditingItem] = useState(null);
+  const [tiers, setTiers] = useState([]);
+  const [tierForm, setTierForm] = useState(emptyPriceTier);
+  const [editingTier, setEditingTier] = useState(null);
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
 
   useEffect(() => {
@@ -284,6 +288,11 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
   async function loadItems() {
     const response = await api.get(`/price-tables/${item.id}/items`);
     setItems(response.data);
+  }
+
+  async function loadTiers(priceItemId) {
+    const response = await api.get(`/price-table-items/${priceItemId}/tiers`);
+    setTiers(response.data);
   }
 
   async function saveItem() {
@@ -297,6 +306,9 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
     await run(() => editingItem ? api.put(`/price-table-items/${editingItem.id}`, payload) : api.post(`/price-tables/${item.id}/items`, payload));
     setEditingItem(null);
     setItemForm(emptyPriceItem);
+    setTiers([]);
+    setEditingTier(null);
+    setTierForm(emptyPriceTier);
     await loadItems();
   }
 
@@ -307,6 +319,9 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
 
   function editItem(priceItem) {
     setEditingItem(priceItem);
+    setTiers(priceItem.tiers || []);
+    setEditingTier(null);
+    setTierForm(emptyPriceTier);
     setItemForm({
       product_id: priceItem.product_id || "",
       base_price: String(priceItem.base_price || "0.00"),
@@ -318,6 +333,38 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
   function cancelItemEdit() {
     setEditingItem(null);
     setItemForm(emptyPriceItem);
+    setTiers([]);
+    setEditingTier(null);
+    setTierForm(emptyPriceTier);
+  }
+
+  async function saveTier() {
+    if (!editingItem?.id) return;
+    const payload = {
+      min_quantity: Number(tierForm.min_quantity || 0),
+      discount_percent: Number(tierForm.discount_percent || 0),
+      active: tierForm.active,
+    };
+    await run(() => editingTier ? api.put(`/price-table-item-tiers/${editingTier.id}`, payload) : api.post(`/price-table-items/${editingItem.id}/tiers`, payload));
+    setEditingTier(null);
+    setTierForm(emptyPriceTier);
+    await loadTiers(editingItem.id);
+    await loadItems();
+  }
+
+  async function removeTier(tier) {
+    await run(() => api.delete(`/price-table-item-tiers/${tier.id}`));
+    await loadTiers(editingItem.id);
+    await loadItems();
+  }
+
+  function editTier(tier) {
+    setEditingTier(tier);
+    setTierForm({
+      min_quantity: String(tier.min_quantity || "1.00"),
+      discount_percent: String(tier.discount_percent || "0.00"),
+      active: tier.active,
+    });
   }
 
   return (
@@ -354,13 +401,40 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
               </div>
             </div>
 
-            <DataTable columns={["Produto", "Preco base", "Margem", "Status", "Acoes"]} rows={items.map((priceItem) => [
+            <DataTable columns={["Produto", "Preco base", "Margem", "Progressiva", "Status", "Acoes"]} rows={items.map((priceItem) => [
               `${priceItem.product_sku || ""} ${priceItem.product_name || ""}`.trim(),
               money.format(Number(priceItem.base_price || 0)),
               `${percent.format(Number(priceItem.margin_percent || 0))}%`,
+              `${priceItem.tiers?.length || 0} faixa(s)`,
               <Status active={priceItem.active} />,
               <RowActions onEdit={() => editItem(priceItem)} onRemove={() => removeItem(priceItem)} />,
             ])} />
+
+            {editingItem && (
+              <section className="nested-detail">
+                <div className="panel-header compact">
+                  <div>
+                    <p>Politica progressiva</p>
+                    <h2>{editingItem.product_name}</h2>
+                  </div>
+                </div>
+                <div className="tier-form">
+                  <Field label="Qtd. minima"><input type="number" min="0.0001" step="0.0001" value={tierForm.min_quantity} onChange={(e) => setTierForm({ ...tierForm, min_quantity: e.target.value })} /></Field>
+                  <Field label="Desconto %"><input type="number" min="0" max="99.9999" step="0.01" value={tierForm.discount_percent} onChange={(e) => setTierForm({ ...tierForm, discount_percent: e.target.value })} /></Field>
+                  <Check label="Ativa" checked={tierForm.active} onChange={(v) => setTierForm({ ...tierForm, active: v })} />
+                  <div className="form-actions">
+                    {editingTier && <button type="button" className="secondary-button" onClick={() => { setEditingTier(null); setTierForm(emptyPriceTier); }}>Cancelar faixa</button>}
+                    <button type="button" className="primary-button" onClick={saveTier}>{editingTier ? "Salvar faixa" : "Incluir faixa"}</button>
+                  </div>
+                </div>
+                <DataTable columns={["Qtd. minima", "Desconto", "Status", "Acoes"]} rows={tiers.map((tier) => [
+                  decimal.format(Number(tier.min_quantity || 0)),
+                  `${percent.format(Number(tier.discount_percent || 0))}%`,
+                  <Status active={tier.active} />,
+                  <RowActions onEdit={() => editTier(tier)} onRemove={() => removeTier(tier)} />,
+                ])} />
+              </section>
+            )}
           </>
         )}
       </section>
@@ -850,12 +924,19 @@ function priceCorrectionHelp(preview, priceTable) {
   const factor = Number(preview.correction_factor || 0);
   const monthlyRate = Number(priceTable?.monthly_rate || 0);
   const periodRate = (monthlyRate / 100) * (Number(preview.days || 0) / 30);
+  const priceBeforeProgressiveDiscount = Number(preview.price_before_progressive_discount || correctedPrice);
+  const progressiveDiscount = Number(preview.progressive_discount_percent || 0);
+  const tierMinQuantity = Number(preview.progressive_tier_min_quantity || 0);
   const factorFormula = preview.correction_mode === "inside"
     ? `1 / (1 - ${decimal.format(periodRate)}) = ${decimal.format(factor)}`
     : `1 + ${decimal.format(periodRate)} = ${decimal.format(factor)}`;
+  const progressiveLine = progressiveDiscount > 0
+    ? `${money.format(priceBeforeProgressiveDiscount)} - ${percent.format(progressiveDiscount)}% pela faixa a partir de ${decimal.format(tierMinQuantity)} = ${money.format(correctedPrice)}`
+    : "Sem desconto progressivo para a quantidade informada.";
   return {
     factorFormula,
-    example: `${money.format(basePrice)} x fator ${decimal.format(factor)} = ${money.format(correctedPrice)}`,
+    example: `${money.format(basePrice)} x fator ${decimal.format(factor)} = ${money.format(priceBeforeProgressiveDiscount)}`,
+    progressiveLine,
     detail: `Taxa do periodo: ${decimal.format(monthlyRate)}% ao mes x ${preview.days} dias / 30 = ${decimal.format(periodRate)}. Como a correcao e ${mode}, o fator fica ${factorFormula}.`,
   };
 }
@@ -875,13 +956,13 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
       setPreview(null);
       return;
     }
-    api.get("/price-preview", { params: { price_table_id: form.price_table_id, product_id: itemForm.product_id, payment_due_date: form.payment_due_date } })
+    api.get("/price-preview", { params: { price_table_id: form.price_table_id, product_id: itemForm.product_id, payment_due_date: form.payment_due_date, quantity: itemForm.quantity || 1 } })
       .then((response) => {
         setPreview(response.data);
         setItemForm((current) => current.negotiated_unit_price ? current : { ...current, negotiated_unit_price: String(response.data.corrected_price || "") });
       })
       .catch(() => setPreview(null));
-  }, [form.price_table_id, itemForm.product_id, form.payment_due_date]);
+  }, [form.price_table_id, itemForm.product_id, itemForm.quantity, form.payment_due_date]);
 
   async function saveHeader() {
     const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_date: form.order_date, payment_due_date: form.payment_due_date, notes: form.notes.trim() || null, items: currentOrder?.items?.map((row) => ({ product_id: row.product_id, quantity: Number(row.quantity || 0), negotiated_unit_price: Number(row.negotiated_unit_price || row.corrected_unit_price || 0) })) || [] };
@@ -969,8 +1050,8 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
         {currentOrder?.id && (
           <>
             <div className="detail-form">
-              <Field label="Produto" wide><Select value={itemForm.product_id} onChange={(v) => setItemForm({ ...itemForm, product_id: v })} options={products} empty="Selecione" /></Field>
-              <Field label="Quantidade"><input type="number" min="0.0001" step="0.0001" value={itemForm.quantity} onChange={(e) => setItemForm({ ...itemForm, quantity: e.target.value })} /></Field>
+              <Field label="Produto" wide><Select value={itemForm.product_id} onChange={(v) => setItemForm({ ...itemForm, product_id: v, negotiated_unit_price: "" })} options={products} empty="Selecione" /></Field>
+              <Field label="Quantidade"><input type="number" min="0.0001" step="0.0001" value={itemForm.quantity} onChange={(e) => setItemForm({ ...itemForm, quantity: e.target.value, negotiated_unit_price: "" })} /></Field>
               <Field label="Valor negociado"><input type="number" min="0" step="0.01" value={itemForm.negotiated_unit_price} onChange={(e) => setItemForm({ ...itemForm, negotiated_unit_price: e.target.value })} /></Field>
               <div className="form-actions">
                 {editingItem && <button type="button" className="secondary-button" onClick={() => { setEditingItem(null); setItemForm(emptyOrderItem); }}>Cancelar item</button>}
@@ -1004,7 +1085,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
         <div className="price-preview">
           <strong>{preview ? money.format(Number(preview.corrected_price || 0)) : "-"}</strong>
           <div className="price-preview-meta">
-            <span>{preview ? `${preview.days} dias, ${preview.correction_mode === "inside" ? "por dentro" : "por fora"}` : "Preco corrigido"}</span>
+            <span>{preview ? `${preview.days} dias, ${preview.correction_mode === "inside" ? "por dentro" : "por fora"}${Number(preview.progressive_discount_percent || 0) > 0 ? `, desc. ${percent.format(Number(preview.progressive_discount_percent))}%` : ""}` : "Preco corrigido"}</span>
             {correctionHelp && (
               <button type="button" className="help-tip" aria-label="Entenda o calculo do preco corrigido">
                 <HelpCircle size={15} />
@@ -1012,6 +1093,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
                   <strong>Entenda o calculo</strong>
                   <span>Fator: {correctionHelp.factorFormula}</span>
                   <span>{correctionHelp.example}</span>
+                  <span>{correctionHelp.progressiveLine}</span>
                   <small>{correctionHelp.detail}</small>
                 </span>
               </button>

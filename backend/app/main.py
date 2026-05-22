@@ -14,6 +14,7 @@ from app.models import (
     CustomerProfile,
     PriceTable,
     PriceTableItem,
+    PriceTableItemTier,
     Product,
     ProductClass,
     ProductGroup,
@@ -33,6 +34,9 @@ from app.schemas import (
     PriceTableCreate,
     PriceTableItemCreate,
     PriceTableItemRead,
+    PriceTableItemTierCreate,
+    PriceTableItemTierRead,
+    PriceTableItemTierUpdate,
     PriceTableItemUpdate,
     PriceTableRead,
     PriceTableUpdate,
@@ -338,6 +342,11 @@ def get_price_table_or_404(db: Session, price_table_id: int) -> PriceTable:
 
 def price_table_item_to_read(db: Session, item: PriceTableItem) -> dict:
     product = db.get(Product, item.product_id)
+    tiers = db.scalars(
+        select(PriceTableItemTier)
+        .where(PriceTableItemTier.price_table_item_id == item.id)
+        .order_by(PriceTableItemTier.min_quantity.asc())
+    ).all()
     return {
         "id": item.id,
         "price_table_id": item.price_table_id,
@@ -347,6 +356,7 @@ def price_table_item_to_read(db: Session, item: PriceTableItem) -> dict:
         "base_price": item.base_price,
         "margin_percent": item.margin_percent,
         "active": item.active,
+        "tiers": tiers,
     }
 
 
@@ -363,6 +373,25 @@ def correction_factor(table: PriceTable, payment_due_date: date) -> Decimal:
 
 def corrected_price(table: PriceTable, base_price: Decimal, payment_due_date: date) -> Decimal:
     return money_round(Decimal(str(base_price)) * correction_factor(table, payment_due_date))
+
+
+def applicable_progressive_tier(db: Session, price_item: PriceTableItem, quantity: Decimal) -> PriceTableItemTier | None:
+    return db.scalar(
+        select(PriceTableItemTier)
+        .where(
+            PriceTableItemTier.price_table_item_id == price_item.id,
+            PriceTableItemTier.active == True,
+            PriceTableItemTier.min_quantity <= quantity,
+        )
+        .order_by(PriceTableItemTier.min_quantity.desc())
+    )
+
+
+def apply_progressive_discount(unit_price: Decimal, tier: PriceTableItemTier | None) -> Decimal:
+    if not tier:
+        return money_round(unit_price)
+    discount = Decimal(str(tier.discount_percent or 0)) / Decimal("100")
+    return money_round(Decimal(str(unit_price)) * (Decimal("1") - discount))
 
 
 def margin_bounds(unit_price: Decimal, margin_percent: Decimal) -> tuple[Decimal, Decimal]:
@@ -720,12 +749,15 @@ def build_order_items(db: Session, order: SalesOrder, table: PriceTable, payload
         )
         if not price_item:
             raise HTTPException(status_code=400, detail=f"Produto {product.sku} sem preco ativo na tabela")
-        unit_price = corrected_price(table, price_item.base_price, payment_due_date)
+        quantity = Decimal(str(payload_item.quantity))
+        price_before_progressive_discount = corrected_price(table, price_item.base_price, payment_due_date)
+        progressive_tier = applicable_progressive_tier(db, price_item, quantity)
+        unit_price = apply_progressive_discount(price_before_progressive_discount, progressive_tier)
         negotiated_unit_price = money_round(Decimal(str(payload_item.negotiated_unit_price or unit_price)))
         min_unit_price, max_unit_price = margin_bounds(unit_price, price_item.margin_percent)
         cost_unit_price = money_round(Decimal(str(product.cost_price or 0)))
-        item_total = money_round(Decimal(str(payload_item.quantity)) * negotiated_unit_price)
-        item_total_cost = money_round(Decimal(str(payload_item.quantity)) * cost_unit_price)
+        item_total = money_round(quantity * negotiated_unit_price)
+        item_total_cost = money_round(quantity * cost_unit_price)
         item_profit = money_round(item_total - item_total_cost)
         item_profitability = profitability_percent(item_total, item_profit)
         item_commercial_status = commercial_status_for_price(negotiated_unit_price, min_unit_price, max_unit_price)
@@ -1274,6 +1306,8 @@ def delete_price_table(price_table_id: int, db: Session = Depends(get_db)):
     if linked_order:
         raise HTTPException(status_code=400, detail="Tabela vinculada a pedidos")
     for table_item in db.scalars(select(PriceTableItem).where(PriceTableItem.price_table_id == price_table_id)).all():
+        for tier in db.scalars(select(PriceTableItemTier).where(PriceTableItemTier.price_table_item_id == table_item.id)).all():
+            db.delete(tier)
         db.delete(table_item)
     db.delete(item)
     db.commit()
@@ -1352,13 +1386,92 @@ def delete_price_table_item(item_id: int, db: Session = Depends(get_db)):
     item = db.get(PriceTableItem, item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Item da tabela de preco nao encontrado")
+    for tier in db.scalars(select(PriceTableItemTier).where(PriceTableItemTier.price_table_item_id == item_id)).all():
+        db.delete(tier)
     db.delete(item)
     db.commit()
     return {"ok": True}
 
 
+@app.get("/price-table-items/{item_id}/tiers", response_model=list[PriceTableItemTierRead], tags=["Tabelas de preco"])
+def list_price_table_item_tiers(item_id: int, db: Session = Depends(get_db)):
+    item = db.get(PriceTableItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item da tabela de preco nao encontrado")
+    return db.scalars(
+        select(PriceTableItemTier)
+        .where(PriceTableItemTier.price_table_item_id == item_id)
+        .order_by(PriceTableItemTier.min_quantity.asc())
+    ).all()
+
+
+@app.post("/price-table-items/{item_id}/tiers", response_model=PriceTableItemTierRead, status_code=status.HTTP_201_CREATED, tags=["Tabelas de preco"])
+def create_price_table_item_tier(item_id: int, payload: PriceTableItemTierCreate, db: Session = Depends(get_db)):
+    item = db.get(PriceTableItem, item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Item da tabela de preco nao encontrado")
+    if Decimal(str(payload.min_quantity)) <= 0:
+        raise HTTPException(status_code=400, detail="Quantidade minima deve ser maior que zero")
+    if Decimal(str(payload.discount_percent)) < 0 or Decimal(str(payload.discount_percent)) >= 100:
+        raise HTTPException(status_code=400, detail="Desconto deve ficar entre 0 e 99,9999")
+    exists = db.scalar(
+        select(PriceTableItemTier).where(
+            PriceTableItemTier.price_table_item_id == item_id,
+            PriceTableItemTier.min_quantity == payload.min_quantity,
+        )
+    )
+    if exists:
+        raise HTTPException(status_code=400, detail="Ja existe faixa para esta quantidade minima")
+    tier = PriceTableItemTier(
+        price_table_item_id=item_id,
+        min_quantity=payload.min_quantity,
+        discount_percent=payload.discount_percent,
+        active=payload.active,
+    )
+    db.add(tier)
+    db.commit()
+    db.refresh(tier)
+    return tier
+
+
+@app.put("/price-table-item-tiers/{tier_id}", response_model=PriceTableItemTierRead, tags=["Tabelas de preco"])
+def update_price_table_item_tier(tier_id: int, payload: PriceTableItemTierUpdate, db: Session = Depends(get_db)):
+    tier = db.get(PriceTableItemTier, tier_id)
+    if not tier:
+        raise HTTPException(status_code=404, detail="Faixa progressiva nao encontrada")
+    if Decimal(str(payload.min_quantity)) <= 0:
+        raise HTTPException(status_code=400, detail="Quantidade minima deve ser maior que zero")
+    if Decimal(str(payload.discount_percent)) < 0 or Decimal(str(payload.discount_percent)) >= 100:
+        raise HTTPException(status_code=400, detail="Desconto deve ficar entre 0 e 99,9999")
+    exists = db.scalar(
+        select(PriceTableItemTier).where(
+            PriceTableItemTier.price_table_item_id == tier.price_table_item_id,
+            PriceTableItemTier.min_quantity == payload.min_quantity,
+            PriceTableItemTier.id != tier_id,
+        )
+    )
+    if exists:
+        raise HTTPException(status_code=400, detail="Ja existe faixa para esta quantidade minima")
+    tier.min_quantity = payload.min_quantity
+    tier.discount_percent = payload.discount_percent
+    tier.active = payload.active
+    db.commit()
+    db.refresh(tier)
+    return tier
+
+
+@app.delete("/price-table-item-tiers/{tier_id}", tags=["Tabelas de preco"])
+def delete_price_table_item_tier(tier_id: int, db: Session = Depends(get_db)):
+    tier = db.get(PriceTableItemTier, tier_id)
+    if not tier:
+        raise HTTPException(status_code=404, detail="Faixa progressiva nao encontrada")
+    db.delete(tier)
+    db.commit()
+    return {"ok": True}
+
+
 @app.get("/price-preview", response_model=PricePreviewRead, tags=["Tabelas de preco"])
-def price_preview(price_table_id: int, product_id: int, payment_due_date: date, db: Session = Depends(get_db)):
+def price_preview(price_table_id: int, product_id: int, payment_due_date: date, quantity: Decimal = Decimal("1"), db: Session = Depends(get_db)):
     table = get_price_table_or_404(db, price_table_id)
     item = db.scalar(
         select(PriceTableItem).where(
@@ -1370,15 +1483,23 @@ def price_preview(price_table_id: int, product_id: int, payment_due_date: date, 
     if not item:
         raise HTTPException(status_code=404, detail="Produto sem preco ativo na tabela")
     days = max((payment_due_date - table.base_date).days, 0)
+    if quantity <= 0:
+        raise HTTPException(status_code=400, detail="Quantidade deve ser maior que zero")
     factor = correction_factor(table, payment_due_date)
+    price_before_discount = money_round(Decimal(str(item.base_price)) * factor)
+    tier = applicable_progressive_tier(db, item, quantity)
     return {
         "price_table_id": price_table_id,
         "product_id": product_id,
         "base_price": item.base_price,
-        "corrected_price": money_round(Decimal(str(item.base_price)) * factor),
+        "corrected_price": apply_progressive_discount(price_before_discount, tier),
         "correction_mode": table.correction_mode,
         "correction_factor": factor,
         "days": days,
+        "quantity": quantity,
+        "progressive_discount_percent": tier.discount_percent if tier else Decimal("0"),
+        "progressive_tier_min_quantity": tier.min_quantity if tier else None,
+        "price_before_progressive_discount": price_before_discount,
     }
 
 
