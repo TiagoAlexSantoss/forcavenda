@@ -42,7 +42,7 @@ O item do pedido busca o preco base na tabela de preco e calcula o preco corrigi
 - Rentabilidade do item: `lucro_item / total_item * 100`.
 - Rentabilidade do pedido: media ponderada da rentabilidade dos itens pelo total de cada item (`quantidade * preco_corrigido`). Na pratica, equivale a `lucro_total / total_pedido * 100`.
 
-## Aprovacao de pedidos
+## Autorizacao de pedidos
 
 O fluxo atual tem duas etapas:
 
@@ -63,8 +63,8 @@ O cadastro **Perfis comerciais** classifica clientes como Novo, Bom, Excelente, 
 Cada item da tabela de preco tem uma margem percentual, iniciando em `5%` por padrao. No pedido, o preco corrigido vem da tabela e o vendedor pode informar um preco negociado:
 
 - Dentro da margem, o item fica comercialmente aprovado.
-- Fora da margem, o item fica pendente de aprovacao comercial.
-- A aprovacao comercial e feita por item, nao pelo pedido inteiro.
+- Fora da margem, o item fica pendente de autorizacao comercial com o motivo exibido na tela de Autorizações.
+- A autorizacao comercial e feita por item, nao pelo pedido inteiro.
 
 O pedido tambem aceita cancelamento integral ou parcial por item. Quando a quantidade cancelada de todos os itens zera o saldo do pedido, o pedido inteiro passa para `cancelled`.
 

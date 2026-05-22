@@ -160,5 +160,6 @@ class SalesOrderItem(Base):
     gross_profit_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     profitability_percent: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False, default=0)
     commercial_status: Mapped[str] = mapped_column(String(30), nullable=False, default="approved")
+    commercial_reason: Mapped[str | None] = mapped_column(String(800), nullable=True)
     cancellation_status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)

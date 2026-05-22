@@ -245,6 +245,7 @@ class SalesOrderItemRead(BaseModel):
     gross_profit_amount: Decimal = Decimal("0.00")
     profitability_percent: Decimal = Decimal("0.00")
     commercial_status: str = "approved"
+    commercial_reason: str | None = None
     cancellation_status: str = "active"
 
     class Config:

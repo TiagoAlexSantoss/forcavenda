@@ -121,7 +121,7 @@ function App() {
 
         <div className="menu-section">Operacoes</div>
         <NavButton active={activeTab === "orders"} onClick={() => openTab("orders")} icon={ClipboardList} label="Pedidos" />
-        <NavButton active={activeTab === "approvals"} onClick={() => openTab("approvals")} icon={CheckCircle2} label="Aprovacoes" />
+        <NavButton active={activeTab === "approvals"} onClick={() => openTab("approvals")} icon={CheckCircle2} label="Autorizacoes" />
       </aside>
 
       <main className="workspace">
@@ -613,7 +613,7 @@ function OrderApprovalsPage({ orders, run }) {
     const rows = orders.flatMap((order) => (order.items || [])
       .filter((item) => item.commercial_status === "pending")
       .map((item) => ({ ...item, order })));
-    return filterRows(rows, query, ["product_name", "product_sku", "commercial_status"]);
+    return filterRows(rows, query, ["product_name", "product_sku", "commercial_status", "commercial_reason"]);
   }, [orders, query]);
 
   function actionButtons(item) {
@@ -639,7 +639,7 @@ function OrderApprovalsPage({ orders, run }) {
       <div className="browser-header">
         <div>
           <p>Operacoes</p>
-          <h2>Aprovacoes de pedidos</h2>
+          <h2>Autorizacoes de pedidos</h2>
         </div>
         <div className="browser-actions">
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar..." />
@@ -663,7 +663,7 @@ function OrderApprovalsPage({ orders, run }) {
         ])} />
       )}
       {activeApproval === "commercial" && (
-        <DataTable columns={["Pedido", "Cliente", "Item", "Preco tabela", "Negociado", "Min.", "Max.", "Acoes"]} rows={commercialItems.map((row) => [
+        <DataTable columns={["Pedido", "Cliente", "Item", "Preco tabela", "Negociado", "Min.", "Max.", "Motivo", "Acoes"]} rows={commercialItems.map((row) => [
           row.order.order_number,
           row.order.customer_name,
           `${row.product_sku} - ${row.product_name}`,
@@ -671,6 +671,7 @@ function OrderApprovalsPage({ orders, run }) {
           money.format(Number(row.negotiated_unit_price || 0)),
           money.format(Number(row.min_unit_price || 0)),
           money.format(Number(row.max_unit_price || 0)),
+          row.commercial_reason || reasonForCommercial(row),
           commercialActionButtons(row),
         ])} />
       )}
@@ -766,7 +767,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
         <Field label="Prazo pagamento"><input type="date" value={form.payment_due_date} onChange={(e) => update("payment_due_date", e.target.value)} /></Field>
         <Field label="Data pedido"><input type="date" value={form.order_date} onChange={(e) => update("order_date", e.target.value)} /></Field>
         <Field label="Observacao" wide><input value={form.notes} onChange={(e) => update("notes", e.target.value)} /></Field>
-        {currentOrder?.approval_notes && <Field label="Aprovacao" wide><input disabled value={currentOrder.approval_notes} /></Field>}
+        {currentOrder?.approval_notes && <Field label="Autorizacao" wide><input disabled value={currentOrder.approval_notes} /></Field>}
         <div className="form-actions"><button type="button" className="secondary-button" onClick={saveHeader}>{currentOrder ? "Salvar cabecalho" : "Salvar cabecalho para itens"}</button></div>
         {currentOrder?.status === "draft" && <div className="form-actions"><button type="button" className="primary-button" onClick={submitOrder}><Send size={16} /> Enviar para aprovacao</button></div>}
         {currentOrder?.id && !["cancelled", "rejected"].includes(currentOrder.status) && <div className="form-actions"><button type="button" className="secondary-button" onClick={cancelOrder}>Cancelar pedido</button></div>}
@@ -898,8 +899,8 @@ function orderStatusLabel(status) {
     draft: "Rascunho",
     pending_financial: "Aprov. financeira",
     financial_blocked: "Bloqueado financeiro",
-    pending_commercial: "Aprov. comercial",
-    approved: "Aprovado",
+    pending_commercial: "Autoriz. comercial",
+    approved: "Autorizado",
     rejected: "Rejeitado",
     cancelled: "Cancelado",
   };
@@ -913,6 +914,15 @@ function commercialStatusLabel(status) {
     rejected: "Rejeitado",
   };
   return labels[status] || status || "-";
+}
+
+function reasonForCommercial(row) {
+  const negotiated = Number(row.negotiated_unit_price || 0);
+  const min = Number(row.min_unit_price || 0);
+  const max = Number(row.max_unit_price || 0);
+  if (negotiated < min) return `Preco negociado abaixo da margem minima (${money.format(min)}).`;
+  if (negotiated > max) return `Preco negociado acima da margem maxima (${money.format(max)}).`;
+  return "Item aguardando autorizacao comercial.";
 }
 
 function DataTable({ columns, rows }) {

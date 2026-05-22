@@ -107,6 +107,7 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS min_unit_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS max_unit_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS commercial_status VARCHAR(30) NOT NULL DEFAULT 'approved'"))
+        connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS commercial_reason VARCHAR(800)"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS cancellation_status VARCHAR(30) NOT NULL DEFAULT 'active'"))
         connection.execute(text("UPDATE sf_sales_order_items SET negotiated_unit_price = corrected_unit_price WHERE negotiated_unit_price = 0"))
         connection.execute(text("UPDATE sf_sales_order_items SET min_unit_price = ROUND(corrected_unit_price * 0.95, 2) WHERE min_unit_price = 0"))
@@ -299,6 +300,17 @@ def commercial_status_for_price(unit_price: Decimal, min_price: Decimal, max_pri
     if unit_price < Decimal(str(min_price or 0)) or unit_price > Decimal(str(max_price or 0)):
         return "pending"
     return "approved"
+
+
+def commercial_reason_for_price(unit_price: Decimal, min_price: Decimal, max_price: Decimal) -> str | None:
+    unit_price = Decimal(str(unit_price or 0))
+    min_price = Decimal(str(min_price or 0))
+    max_price = Decimal(str(max_price or 0))
+    if unit_price < min_price:
+        return f"Preco negociado abaixo da margem minima: {unit_price} menor que {min_price}."
+    if unit_price > max_price:
+        return f"Preco negociado acima da margem maxima: {unit_price} maior que {max_price}."
+    return None
 
 
 def effective_quantity(item: SalesOrderItem) -> Decimal:
@@ -506,7 +518,7 @@ def refresh_order_approval_stage(db: Session, order: SalesOrder):
     if pending:
         order.status = "pending_commercial"
         order.approval_stage = "commercial"
-        order.approval_notes = "Pedido possui item(ns) fora da margem comercial."
+        order.approval_notes = "Pedido possui item(ns) que precisam de autorizacao comercial."
         return
     if order.status in {"pending_commercial", "financial_blocked"}:
         order.status = "approved"
@@ -539,6 +551,7 @@ def build_order_items(db: Session, order: SalesOrder, table: PriceTable, payload
         item_total_cost = money_round(Decimal(str(payload_item.quantity)) * cost_unit_price)
         item_profit = money_round(item_total - item_total_cost)
         item_profitability = profitability_percent(item_total, item_profit)
+        item_commercial_status = commercial_status_for_price(negotiated_unit_price, min_unit_price, max_unit_price)
         db.add(
             SalesOrderItem(
                 order_id=order.id,
@@ -558,7 +571,8 @@ def build_order_items(db: Session, order: SalesOrder, table: PriceTable, payload
                 total_cost_amount=item_total_cost,
                 gross_profit_amount=item_profit,
                 profitability_percent=item_profitability,
-                commercial_status=commercial_status_for_price(negotiated_unit_price, min_unit_price, max_unit_price),
+                commercial_status=item_commercial_status,
+                commercial_reason=commercial_reason_for_price(negotiated_unit_price, min_unit_price, max_unit_price),
                 cancellation_status="active",
             )
         )
@@ -1353,6 +1367,7 @@ def approve_order_item_commercial(order_id: int, item_id: int, db: Session = Dep
     if not item or item.order_id != order.id:
         raise HTTPException(status_code=404, detail="Item do pedido nao encontrado")
     item.commercial_status = "approved"
+    item.commercial_reason = "Item autorizado comercialmente."
     recalculate_order_totals(db, order)
     refresh_order_approval_stage(db, order)
     db.commit()
