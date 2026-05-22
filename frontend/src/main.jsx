@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Edit3, HelpCircle, Layers3, Menu, Package, Plus, RefreshCcw, Send, Tags, Trash2, Users, X, XCircle } from "lucide-react";
+import { Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Edit3, HelpCircle, Home, Layers3, Menu, Moon, Package, Plus, RefreshCcw, Send, Sun, Tags, Trash2, Users, X, XCircle } from "lucide-react";
 import api from "./services/api";
 import "./styles.css";
 
@@ -43,7 +43,8 @@ function errorMessage(error, fallback = MESSAGES.operationFailed) {
 }
 
 function App() {
-  const [activeTab, setActiveTab] = useState("products");
+  const [activeTab, setActiveTab] = useState("home");
+  const [theme, setTheme] = useState(() => localStorage.getItem("easysales-theme") || "light");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [menuOpen, setMenuOpen] = useState({ cadastros: true, operacoes: true });
   const [health, setHealth] = useState(null);
@@ -60,6 +61,11 @@ function App() {
   useEffect(() => {
     loadAll();
   }, []);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("easysales-theme", theme);
+  }, [theme]);
 
   async function loadAll() {
     try {
@@ -95,6 +101,7 @@ function App() {
   }
 
   const pageMeta = {
+    home: ["Visao geral", "Home"],
     products: ["Cadastros", "Produtos"],
     priceTables: ["Cadastros", "Tabelas de preco"],
     groups: ["Cadastros", "Grupos de produtos"],
@@ -130,6 +137,8 @@ function App() {
           <button type="button" className="sidebar-toggle" onClick={() => setSidebarCollapsed((value) => !value)} title="Recolher menu"><Menu size={22} /></button>
         </div>
 
+        <NavButton active={activeTab === "home"} onClick={() => openTab("home")} icon={Home} label="Home" />
+
         <MenuGroup title="Cadastros" open={menuOpen.cadastros} collapsed={sidebarCollapsed} onToggle={() => setMenuOpen((current) => ({ ...current, cadastros: !current.cadastros }))}>
           <NavButton active={activeTab === "products"} onClick={() => openTab("products")} icon={Box} label="Produtos" />
           <NavButton active={activeTab === "priceTables"} onClick={() => openTab("priceTables")} icon={Tags} label="Tabelas de preco" />
@@ -152,11 +161,17 @@ function App() {
             <p>{pageMeta[0]}</p>
             <h1>{pageMeta[1]}</h1>
           </div>
-          <button className="secondary-button" onClick={loadAll}><RefreshCcw size={17} /> Atualizar</button>
+          <div className="topbar-actions">
+            <button className="secondary-button" onClick={() => setTheme((value) => value === "dark" ? "light" : "dark")}>
+              {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />} {theme === "dark" ? "Claro" : "Escuro"}
+            </button>
+            <button className="secondary-button" onClick={loadAll}><RefreshCcw size={17} /> Atualizar</button>
+          </div>
         </header>
 
         {message && <div className={`message ${message.type}`}>{message.text}</div>}
 
+        {activeTab === "home" && <HomePage orders={orders} customers={customers} products={products} priceTables={priceTables} customerMonitoring={customerMonitoring} openTab={openTab} />}
         {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} run={run} />}
         {activeTab === "priceTables" && <PriceTablesBrowser priceTables={priceTables} products={products} run={run} />}
         {activeTab === "groups" && <SimpleCatalogBrowser title="Grupos de produtos" eyebrow="Cadastros" endpoint="/product-groups" items={groups} template={emptyGroup} run={run} />}
@@ -185,6 +200,87 @@ function MenuGroup({ title, open, collapsed, onToggle, children }) {
 
 function NavButton({ active, onClick, icon: Icon, label }) {
   return <button className={active ? "active" : ""} onClick={onClick} title={label}><Icon size={18} /> <span>{label}</span></button>;
+}
+
+function HomePage({ orders, customers, products, priceTables, customerMonitoring, openTab }) {
+  const pendingOrders = orders.filter(isOrderInApproval);
+  const overdueDeliveries = orders.filter(isOrderDeliveryOverdue);
+  const approvedOrders = orders.filter((order) => order.status === "approved");
+  const criticalCustomers = customerMonitoring.filter((row) => row.health_status === "critical");
+  const openOrderTotal = orders
+    .filter((order) => !["cancelled", "rejected"].includes(order.status))
+    .reduce((total, order) => total + Number(order.total_amount || 0), 0);
+  const recentOrders = orders.slice(0, 5);
+
+  return (
+    <div className="home-layout">
+      <section className="home-hero">
+        <div>
+          <p>EasySales</p>
+          <h2>Operacao comercial em tempo real</h2>
+          <span>Pedidos, autorizacoes, entregas e carteira de clientes no mesmo lugar.</span>
+        </div>
+        <div className="home-actions">
+          <button className="primary-button" onClick={() => openTab("orders")}><ClipboardList size={17} /> Pedidos</button>
+          <button className="secondary-button" onClick={() => openTab("approvals")}><CheckCircle2 size={17} /> Autorizar</button>
+        </div>
+      </section>
+
+      <section className="home-kpis">
+        <HomeCard label="Pedidos em autorizacao" value={pendingOrders.length} tone="warning" onClick={() => openTab("approvals")} />
+        <HomeCard label="Entregas vencidas" value={overdueDeliveries.length} tone="danger" onClick={() => openTab("orders")} />
+        <HomeCard label="Clientes criticos" value={criticalCustomers.length} tone="danger" onClick={() => openTab("customerManagement")} />
+        <HomeCard label="Carteira aberta" value={money.format(openOrderTotal)} tone="success" onClick={() => openTab("orders")} />
+      </section>
+
+      <section className="home-grid">
+        <article className="home-panel">
+          <div className="panel-header compact">
+            <div>
+              <p>Operacoes</p>
+              <h2>Pedidos recentes</h2>
+            </div>
+          </div>
+          <div className="home-list">
+            {recentOrders.map((order) => (
+              <button key={order.id} type="button" onClick={() => openTab("orders")}>
+                <span>
+                  <strong>{order.order_number}</strong>
+                  <small>{order.customer_name}</small>
+                </span>
+                <OrderStatus status={order.status} overdue={isOrderDeliveryOverdue(order)} />
+              </button>
+            ))}
+            {recentOrders.length === 0 && <div className="empty-detail">Nenhum pedido cadastrado.</div>}
+          </div>
+        </article>
+
+        <article className="home-panel">
+          <div className="panel-header compact">
+            <div>
+              <p>Cadastros</p>
+              <h2>Base comercial</h2>
+            </div>
+          </div>
+          <div className="home-base">
+            <span><strong>{customers.length}</strong> clientes</span>
+            <span><strong>{products.length}</strong> produtos</span>
+            <span><strong>{priceTables.length}</strong> tabelas</span>
+            <span><strong>{approvedOrders.length}</strong> pedidos autorizados</span>
+          </div>
+        </article>
+      </section>
+    </div>
+  );
+}
+
+function HomeCard({ label, value, tone, onClick }) {
+  return (
+    <button type="button" className={`home-card ${tone}`} onClick={onClick}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </button>
+  );
 }
 
 function ProductsBrowser({ products, groups, classes, run }) {
