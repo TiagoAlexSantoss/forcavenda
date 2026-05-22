@@ -99,6 +99,7 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS profitability_percent NUMERIC(10, 4) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS approval_stage VARCHAR(30) NOT NULL DEFAULT 'draft'"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS approval_notes VARCHAR(800)"))
+        connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS order_type VARCHAR(20) NOT NULL DEFAULT 'sale'"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS delivery_date DATE"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS financial_approved_at TIMESTAMP"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS commercial_approved_at TIMESTAMP"))
@@ -118,6 +119,7 @@ async def startup():
         connection.execute(text("UPDATE sf_sales_order_items SET negotiated_unit_price = corrected_unit_price WHERE negotiated_unit_price = 0"))
         connection.execute(text("UPDATE sf_sales_order_items SET min_unit_price = ROUND(corrected_unit_price * 0.95, 2) WHERE min_unit_price = 0"))
         connection.execute(text("UPDATE sf_sales_order_items SET max_unit_price = ROUND(corrected_unit_price * 1.05, 2) WHERE max_unit_price = 0"))
+        connection.execute(text("UPDATE sf_sales_orders SET order_type = 'sale' WHERE order_type IS NULL OR order_type = ''"))
     seed_customer_profiles()
 
 
@@ -126,6 +128,13 @@ def normalize_code(value: str, field_name: str = "Codigo") -> str:
     if not code:
         raise HTTPException(status_code=400, detail=f"{field_name} e obrigatorio")
     return code
+
+
+def normalize_order_type(value: str | None) -> str:
+    order_type = (value or "sale").strip().lower()
+    if order_type not in {"sale", "purchase"}:
+        raise HTTPException(status_code=400, detail="Tipo de pedido invalido")
+    return order_type
 
 
 def seed_customer_profiles():
@@ -575,6 +584,7 @@ def order_to_read(db: Session, order: SalesOrder) -> dict:
     return {
         "id": order.id,
         "order_number": order.order_number,
+        "order_type": order.order_type or "sale",
         "customer_source": order.customer_source,
         "customer_external_id": order.customer_external_id,
         "customer_name": order.customer_name,
@@ -1527,6 +1537,7 @@ def create_order(payload: SalesOrderCreate, db: Session = Depends(get_db)):
     customer = resolve_customer(db, payload.customer_id)
     order = SalesOrder(
         order_number=next_order_number(db),
+        order_type=normalize_order_type(payload.order_type),
         customer_source=customer["source"],
         customer_external_id=customer["external_id"],
         customer_name=customer["name"],
@@ -1614,6 +1625,7 @@ def update_order(order_id: int, payload: SalesOrderUpdate, db: Session = Depends
         db.delete(item)
     db.flush()
     order.customer_source = customer["source"]
+    order.order_type = normalize_order_type(payload.order_type)
     order.customer_external_id = customer["external_id"]
     order.customer_name = customer["name"]
     order.price_table_id = table.id

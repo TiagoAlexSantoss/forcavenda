@@ -17,7 +17,7 @@ const emptyProduct = { product_group_id: "", product_class_id: "", sku: "", name
 const emptyPriceTable = { code: "", name: "", correction_mode: "outside", monthly_rate: "0.00", base_date: today, active: true };
 const emptyPriceItem = { product_id: "", base_price: "0.00", margin_percent: "5.00", active: true };
 const emptyPriceTier = { min_quantity: "1.00", discount_percent: "0.00", active: true };
-const emptyOrder = { customer_id: "", price_table_id: "", order_date: today, payment_due_date: today, delivery_date: "", notes: "" };
+const emptyOrder = { customer_id: "", price_table_id: "", order_type: "sale", order_date: today, payment_due_date: today, delivery_date: "", notes: "" };
 const emptyOrderItem = { product_id: "", quantity: "1", negotiated_unit_price: "" };
 
 const MESSAGE_TYPES = {
@@ -850,15 +850,15 @@ function CustomerModal({ state, setState, customerProfiles, onSave, run }) {
 function OrdersBrowser({ orders, customers, products, priceTables, run }) {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
-  const rows = useMemo(() => filterRows(orders, query, ["order_number", "customer_name", "price_table_name", "status"]), [orders, query]);
+  const rows = useMemo(() => filterRows(orders, query, ["order_number", "order_type", "customer_name", "price_table_name", "status"]), [orders, query]);
 
   function toForm(item) {
     if (!item) return emptyOrder;
-    return { customer_id: `${item.customer_source}:${item.customer_external_id}`, price_table_id: item.price_table_id || "", order_date: item.order_date, payment_due_date: item.payment_due_date, delivery_date: item.delivery_date || "", notes: item.notes || "" };
+    return { customer_id: `${item.customer_source}:${item.customer_external_id}`, price_table_id: item.price_table_id || "", order_type: item.order_type || "sale", order_date: item.order_date, payment_due_date: item.payment_due_date, delivery_date: item.delivery_date || "", notes: item.notes || "" };
   }
 
   async function save(form, item) {
-    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: item ? item.items.map((row) => ({ product_id: row.product_id, quantity: row.quantity, negotiated_unit_price: row.negotiated_unit_price })) : [] };
+    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_type: form.order_type || "sale", order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: item ? item.items.map((row) => ({ product_id: row.product_id, quantity: row.quantity, negotiated_unit_price: row.negotiated_unit_price })) : [] };
     await run(() => item ? api.put(`/orders/${item.id}`, payload) : api.post("/orders", payload));
     setModal(null);
   }
@@ -866,10 +866,11 @@ function OrdersBrowser({ orders, customers, products, priceTables, run }) {
   return (
     <Browser title="Pedidos" eyebrow="Operacoes" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: toForm(null) })}>
       <OrderLegend />
-      <DataTable columns={["Pedido", "Cliente", "Tabela", "Pedido em", "Pagamento", "Entrega", "Total", "Lucro", "Rentab.", "Status", "Acoes"]} rows={rows.map((item) => ({
+      <DataTable columns={["Pedido", "Tipo", "Cliente", "Tabela", "Pedido em", "Pagamento", "Entrega", "Total", "Lucro", "Rentab.", "Status", "Acoes"]} rows={rows.map((item) => ({
         className: orderRowClassName(item),
         cells: [
           item.order_number,
+          orderTypeLabel(item.order_type),
           item.customer_name,
           item.price_table_name || item.price_table_id,
           item.order_date,
@@ -1078,7 +1079,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
   }, [form.price_table_id, itemForm.product_id, itemForm.quantity, form.payment_due_date]);
 
   async function saveHeader() {
-    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: currentOrder?.items?.map((row) => ({ product_id: row.product_id, quantity: Number(row.quantity || 0), negotiated_unit_price: Number(row.negotiated_unit_price || row.corrected_unit_price || 0) })) || [] };
+    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_type: form.order_type || "sale", order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: currentOrder?.items?.map((row) => ({ product_id: row.product_id, quantity: Number(row.quantity || 0), negotiated_unit_price: Number(row.negotiated_unit_price || row.corrected_unit_price || 0) })) || [] };
     const response = currentOrder
       ? await api.put(`/orders/${currentOrder.id}`, payload)
       : await api.post("/orders", { ...payload, items: [] });
@@ -1140,6 +1141,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
     <Modal title={currentOrder ? `Editar pedido ${currentOrder.order_number}` : "Novo pedido"} onClose={() => setState(null)} onSubmit={() => onSave(form, currentOrder)}>
       <div className="modal-grid">
         <Field label="Cliente" wide><Select value={form.customer_id} onChange={(v) => update("customer_id", v)} options={customers} empty="Selecione" required labelKey="name" valueKey="id" /></Field>
+        <Field label="Tipo"><select value={form.order_type || "sale"} onChange={(event) => update("order_type", event.target.value)}><option value="sale">Pedido de venda</option><option value="purchase">Pedido de compra</option></select></Field>
         <Field label="Tabela"><Select value={form.price_table_id} onChange={(v) => update("price_table_id", v)} options={priceTables} empty="Selecione" required /></Field>
         <Field label="Prazo pagamento"><input type="date" value={form.payment_due_date} onChange={(e) => update("payment_due_date", e.target.value)} /></Field>
         <Field label="Previsao entrega"><input type="date" value={form.delivery_date} onChange={(e) => update("delivery_date", e.target.value)} /></Field>
@@ -1154,6 +1156,7 @@ function OrderModal({ state, setState, customers, products, priceTables, run, on
       <section className="modal-detail">
         {currentOrder?.id && (
           <div className="order-context">
+            <span>Tipo <strong>{orderTypeLabel(currentOrder.order_type)}</strong></span>
             <span>Status <OrderStatus status={currentOrder.status} overdue={isOrderDeliveryOverdue(currentOrder)} /></span>
             <span>Pagamento <strong>{currentOrder.payment_due_date}</strong></span>
             <span>Entrega <strong>{currentOrder.delivery_date || "Nao informada"}</strong></span>
@@ -1334,6 +1337,14 @@ function orderStatusLabel(status) {
     cancelled: "Cancelado",
   };
   return labels[status] || status;
+}
+
+function orderTypeLabel(type) {
+  const labels = {
+    purchase: "Pedido de compra",
+    sale: "Pedido de venda",
+  };
+  return labels[type] || "Pedido de venda";
 }
 
 function CommercialStatus({ status }) {

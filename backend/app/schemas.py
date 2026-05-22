@@ -264,6 +264,7 @@ class SalesOrderItemCancel(BaseModel):
 class SalesOrderCreate(BaseModel):
     customer_id: str
     price_table_id: int
+    order_type: str = "sale"
     order_date: date
     payment_due_date: date
     delivery_date: date | None = None
@@ -314,6 +315,7 @@ class AuthorizationReasonRead(BaseModel):
 class SalesOrderRead(BaseModel):
     id: int
     order_number: str
+    order_type: str = "sale"
     customer_source: str
     customer_external_id: str
     customer_name: str
