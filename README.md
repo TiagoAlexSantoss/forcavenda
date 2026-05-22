@@ -65,6 +65,7 @@ Cada item da tabela de preco tem uma margem percentual, iniciando em `5%` por pa
 - Dentro da margem, o item fica comercialmente aprovado.
 - Fora da margem, o item fica pendente de autorizacao comercial com o motivo exibido na tela de Autorizações.
 - A autorizacao comercial e feita por item, nao pelo pedido inteiro.
+- A tela de Autorizações exibe motivos em area expansivel por pedido, separados por segmento financeiro e comercial. Essa estrutura prepara o produto para aprovadores diferentes por motivo.
 
 O pedido tambem aceita cancelamento integral ou parcial por item. Quando a quantidade cancelada de todos os itens zera o saldo do pedido, o pedido inteiro passa para `cancelled`.
 

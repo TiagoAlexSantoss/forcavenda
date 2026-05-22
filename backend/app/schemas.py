@@ -252,6 +252,16 @@ class SalesOrderItemRead(BaseModel):
         from_attributes = True
 
 
+class AuthorizationReasonRead(BaseModel):
+    segment: str
+    scope: str
+    reason: str
+    status: str = "pending"
+    item_id: int | None = None
+    item_name: str | None = None
+    suggested_role: str | None = None
+
+
 class SalesOrderRead(BaseModel):
     id: int
     order_number: str
@@ -272,6 +282,7 @@ class SalesOrderRead(BaseModel):
     gross_profit_amount: Decimal = Decimal("0.00")
     profitability_percent: Decimal = Decimal("0.00")
     notes: str | None = None
+    authorization_reasons: list[AuthorizationReasonRead] = Field(default_factory=list)
     items: list[SalesOrderItemRead] = Field(default_factory=list)
 
     class Config:

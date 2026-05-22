@@ -605,18 +605,25 @@ function OrdersBrowser({ orders, customers, products, priceTables, run }) {
 function OrderApprovalsPage({ orders, run }) {
   const [activeApproval, setActiveApproval] = useState("financial");
   const [query, setQuery] = useState("");
+  const [expanded, setExpanded] = useState({});
   const filtered = useMemo(() => {
     const pool = orders.filter((order) => ["pending_financial", "financial_blocked"].includes(order.status));
     return filterRows(pool, query, ["order_number", "customer_name", "price_table_name", "approval_notes"]);
   }, [orders, query]);
-  const commercialItems = useMemo(() => {
-    const rows = orders.flatMap((order) => (order.items || [])
-      .filter((item) => item.commercial_status === "pending")
-      .map((item) => ({ ...item, order })));
-    return filterRows(rows, query, ["product_name", "product_sku", "commercial_status", "commercial_reason"]);
+  const commercialOrders = useMemo(() => {
+    const pool = orders.filter((order) => (order.authorization_reasons || []).some((reason) => reason.segment === "commercial"));
+    return filterRows(pool, query, ["order_number", "customer_name", "price_table_name", "approval_notes"]);
   }, [orders, query]);
 
-  function actionButtons(item) {
+  function toggle(orderId) {
+    setExpanded((current) => ({ ...current, [orderId]: !current[orderId] }));
+  }
+
+  function reasonsFor(order, segment) {
+    return (order.authorization_reasons || []).filter((reason) => reason.segment === segment);
+  }
+
+  function financialActions(item) {
     return (
       <div className="row-actions">
         {activeApproval === "financial" && <button type="button" onClick={() => run(() => api.post(`/orders/${item.id}/approve-financial`))} title="Aprovar financeiro"><CheckCircle2 size={15} /></button>}
@@ -625,13 +632,40 @@ function OrderApprovalsPage({ orders, run }) {
     );
   }
 
-  function commercialActionButtons(row) {
+  function commercialActionButtons(order, reason) {
     return (
       <div className="row-actions">
-        <button type="button" onClick={() => run(() => api.post(`/orders/${row.order.id}/items/${row.id}/approve-commercial`))} title="Aprovar item"><CheckCircle2 size={15} /></button>
-        <button type="button" onClick={() => run(() => api.post(`/orders/${row.order.id}/reject`))} title="Rejeitar pedido"><XCircle size={15} /></button>
+        <button type="button" onClick={() => run(() => api.post(`/orders/${order.id}/items/${reason.item_id}/approve-commercial`))} title="Autorizar item"><CheckCircle2 size={15} /></button>
+        <button type="button" onClick={() => run(() => api.post(`/orders/${order.id}/reject`))} title="Rejeitar pedido"><XCircle size={15} /></button>
       </div>
     );
+  }
+
+  function approvalRows(orderList, segment) {
+    return orderList.flatMap((order) => {
+      const reasons = reasonsFor(order, segment);
+      const base = [
+        <tr key={`${segment}-${order.id}`}>
+          <td><button type="button" className="link-button" onClick={() => toggle(`${segment}-${order.id}`)}>{expanded[`${segment}-${order.id}`] ? "Recolher" : "Expandir"}</button></td>
+          <td>{order.order_number}</td>
+          <td>{order.customer_name}</td>
+          <td>{order.payment_due_date}</td>
+          <td>{money.format(Number(order.total_amount || 0))}</td>
+          <td>{orderStatusLabel(order.status)}</td>
+          <td>{reasons.length}</td>
+          <td>{segment === "financial" ? financialActions(order) : <span className="muted-inline">Autorize por motivo</span>}</td>
+        </tr>,
+      ];
+      if (!expanded[`${segment}-${order.id}`]) return base;
+      return [
+        ...base,
+        <tr key={`${segment}-${order.id}-reasons`}>
+          <td colSpan="8">
+            <AuthorizationReasons reasons={reasons} order={order} segment={segment} commercialActionButtons={commercialActionButtons} />
+          </td>
+        </tr>,
+      ];
+    });
   }
 
   return (
@@ -650,32 +684,63 @@ function OrderApprovalsPage({ orders, run }) {
         <button type="button" className={activeApproval === "commercial" ? "active" : ""} onClick={() => setActiveApproval("commercial")}>Comercial</button>
       </div>
       {activeApproval === "financial" && (
-        <DataTable columns={["Pedido", "Cliente", "Prazo", "Total", "Lucro", "Rentab.", "Status", "Observacao", "Acoes"]} rows={filtered.map((item) => [
-          item.order_number,
-          item.customer_name,
-          item.payment_due_date,
-          money.format(Number(item.total_amount || 0)),
-          money.format(Number(item.gross_profit_amount || 0)),
-          `${percent.format(Number(item.profitability_percent || 0))}%`,
-          orderStatusLabel(item.status),
-          item.approval_notes || "-",
-          actionButtons(item),
-        ])} />
+        <AuthorizationTable rows={approvalRows(filtered, "financial")} emptyText="Nenhum pedido aguardando autorizacao financeira." />
       )}
       {activeApproval === "commercial" && (
-        <DataTable columns={["Pedido", "Cliente", "Item", "Preco tabela", "Negociado", "Min.", "Max.", "Motivo", "Acoes"]} rows={commercialItems.map((row) => [
-          row.order.order_number,
-          row.order.customer_name,
-          `${row.product_sku} - ${row.product_name}`,
-          money.format(Number(row.corrected_unit_price || 0)),
-          money.format(Number(row.negotiated_unit_price || 0)),
-          money.format(Number(row.min_unit_price || 0)),
-          money.format(Number(row.max_unit_price || 0)),
-          row.commercial_reason || reasonForCommercial(row),
-          commercialActionButtons(row),
-        ])} />
+        <AuthorizationTable rows={approvalRows(commercialOrders, "commercial")} emptyText="Nenhum item aguardando autorizacao comercial." />
       )}
     </section>
+  );
+}
+
+function AuthorizationTable({ rows, emptyText }) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Motivos</th>
+            <th>Pedido</th>
+            <th>Cliente</th>
+            <th>Prazo</th>
+            <th>Total</th>
+            <th>Status</th>
+            <th>Qtd.</th>
+            <th>Acoes</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows}
+          {rows.length === 0 && <tr><td colSpan="8" className="empty">{emptyText}</td></tr>}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function AuthorizationReasons({ reasons, order, segment, commercialActionButtons }) {
+  const financial = reasons.filter((reason) => reason.segment === "financial");
+  const commercial = reasons.filter((reason) => reason.segment === "commercial");
+  const grouped = segment === "financial" ? [["Financeiro", financial]] : [["Comercial", commercial]];
+  return (
+    <div className="authorization-panel">
+      {grouped.map(([title, items]) => (
+        <section key={title}>
+          <h3>{title}</h3>
+          {items.map((reason, index) => (
+            <div className="authorization-reason" key={`${reason.segment}-${reason.item_id || index}`}>
+              <div>
+                <strong>{reason.item_name || "Pedido"}</strong>
+                <span>{reason.reason}</span>
+                <small>Escopo: {reason.scope} | Status: {reason.status} | Papel sugerido: {reason.suggested_role || "-"}</small>
+              </div>
+              {reason.segment === "commercial" && commercialActionButtons(order, reason)}
+            </div>
+          ))}
+          {items.length === 0 && <div className="empty-detail">Sem motivos neste segmento.</div>}
+        </section>
+      ))}
+    </div>
   );
 }
 
@@ -914,15 +979,6 @@ function commercialStatusLabel(status) {
     rejected: "Rejeitado",
   };
   return labels[status] || status || "-";
-}
-
-function reasonForCommercial(row) {
-  const negotiated = Number(row.negotiated_unit_price || 0);
-  const min = Number(row.min_unit_price || 0);
-  const max = Number(row.max_unit_price || 0);
-  if (negotiated < min) return `Preco negociado abaixo da margem minima (${money.format(min)}).`;
-  if (negotiated > max) return `Preco negociado acima da margem maxima (${money.format(max)}).`;
-  return "Item aguardando autorizacao comercial.";
 }
 
 function DataTable({ columns, rows }) {

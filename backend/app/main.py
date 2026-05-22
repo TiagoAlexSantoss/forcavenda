@@ -363,6 +363,38 @@ def next_order_number(db: Session) -> str:
     return f"PV-{(latest_id or 0) + 1:06d}"
 
 
+def order_authorization_reasons(order: SalesOrder, items: list[SalesOrderItem]) -> list[dict]:
+    reasons = []
+    if order.status in {"pending_financial", "financial_blocked"} and order.approval_notes:
+        reasons.append(
+            {
+                "segment": "financial",
+                "scope": "order",
+                "reason": order.approval_notes,
+                "status": "blocked" if order.status == "financial_blocked" else "pending",
+                "suggested_role": "financeiro",
+            }
+        )
+    for item in items:
+        if item.commercial_status == "pending":
+            reasons.append(
+                {
+                    "segment": "commercial",
+                    "scope": "item",
+                    "item_id": item.id,
+                    "item_name": f"{item.product_sku} - {item.product_name}",
+                    "reason": item.commercial_reason or commercial_reason_for_price(
+                        item.negotiated_unit_price,
+                        item.min_unit_price,
+                        item.max_unit_price,
+                    ) or "Item requer autorizacao comercial.",
+                    "status": "pending",
+                    "suggested_role": "comercial",
+                }
+            )
+    return reasons
+
+
 def order_to_read(db: Session, order: SalesOrder) -> dict:
     table = db.get(PriceTable, order.price_table_id)
     items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id).order_by(SalesOrderItem.id.asc())).all()
@@ -386,6 +418,7 @@ def order_to_read(db: Session, order: SalesOrder) -> dict:
         "gross_profit_amount": order.gross_profit_amount,
         "profitability_percent": order.profitability_percent,
         "notes": order.notes,
+        "authorization_reasons": order_authorization_reasons(order, items),
         "items": items,
     }
 
