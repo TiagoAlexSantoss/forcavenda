@@ -866,7 +866,7 @@ function OrdersBrowser({ orders, customers, products, priceTables, run }) {
   return (
     <Browser title="Pedidos" eyebrow="Operacoes" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: toForm(null) })}>
       <OrderLegend />
-      <DataTable columns={["Pedido", "Tipo", "Cliente", "Tabela", "Pedido em", "Pagamento", "Entrega", "Total", "Lucro", "Rentab.", "Status", "Acoes"]} rows={rows.map((item) => ({
+      <DataTable className="orders-table" columns={["Pedido", "Tipo", "Cliente", "Tabela", "Pedido em", "Pagamento", "Entrega", "Total", "Lucro", "Rentab.", "Status", "Acoes"]} rows={rows.map((item) => ({
         className: orderRowClassName(item),
         cells: [
           item.order_number,
@@ -1369,10 +1369,10 @@ function healthStatusLabel(status) {
   return labels[status] || status;
 }
 
-function DataTable({ columns, rows }) {
+function DataTable({ columns, rows, className = "" }) {
   return (
     <div className="table-wrap">
-      <table>
+      <table className={className}>
         <thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
         <tbody>
           {rows.map((row, index) => {

@@ -615,13 +615,19 @@ select:disabled {
 }
 
 .table-wrap {
-  overflow: auto;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 
 table {
   width: 100%;
   border-collapse: collapse;
   min-width: 760px;
+}
+
+.orders-table {
+  min-width: 1320px;
 }
 
 th,
