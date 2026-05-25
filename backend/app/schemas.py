@@ -253,6 +253,7 @@ class PricePreviewRead(BaseModel):
 
 class SalesOrderItemCreate(BaseModel):
     product_id: int
+    warehouse_id: int | None = None
     quantity: Decimal
     negotiated_unit_price: Decimal | None = None
 
@@ -264,6 +265,7 @@ class SalesOrderItemCancel(BaseModel):
 class SalesOrderCreate(BaseModel):
     customer_id: str
     price_table_id: int
+    warehouse_id: int | None = None
     order_type: str = "sale"
     order_date: date
     payment_due_date: date
@@ -281,6 +283,8 @@ class SalesOrderItemRead(BaseModel):
     product_id: int
     product_sku: str
     product_name: str
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
     quantity: Decimal
     cancelled_quantity: Decimal = Decimal("0.00")
     base_unit_price: Decimal
@@ -321,6 +325,8 @@ class SalesOrderRead(BaseModel):
     customer_name: str
     price_table_id: int
     price_table_name: str | None = None
+    warehouse_id: int | None = None
+    warehouse_name: str | None = None
     order_date: date
     payment_due_date: date
     delivery_date: date | None = None

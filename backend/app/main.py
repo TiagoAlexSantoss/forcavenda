@@ -101,8 +101,12 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS approval_notes VARCHAR(800)"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS order_type VARCHAR(20) NOT NULL DEFAULT 'sale'"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS delivery_date DATE"))
+        connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS warehouse_id INTEGER"))
+        connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS warehouse_name VARCHAR(160)"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS financial_approved_at TIMESTAMP"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS commercial_approved_at TIMESTAMP"))
+        connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS warehouse_id INTEGER"))
+        connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS warehouse_name VARCHAR(160)"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS cost_unit_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS total_cost_amount NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS gross_profit_amount NUMERIC(14, 2) NOT NULL DEFAULT 0"))
@@ -480,6 +484,18 @@ def next_order_number(db: Session) -> str:
     return f"PV-{(latest_id or 0) + 1:06d}"
 
 
+def resolve_warehouse(db: Session, warehouse_id: int | None) -> dict | None:
+    if not warehouse_id:
+        return None
+    row = db.execute(
+        text("SELECT id, name, active FROM flow_warehouses WHERE id = :id"),
+        {"id": warehouse_id},
+    ).mappings().first()
+    if not row or not row["active"]:
+        raise HTTPException(status_code=400, detail="Local de estoque inativo ou nao encontrado")
+    return {"id": int(row["id"]), "name": row["name"]}
+
+
 def financial_authorization_reasons(db: Session, order: SalesOrder) -> list[dict]:
     if order.status not in {"pending_financial", "financial_blocked"}:
         return []
@@ -590,6 +606,8 @@ def order_to_read(db: Session, order: SalesOrder) -> dict:
         "customer_name": order.customer_name,
         "price_table_id": order.price_table_id,
         "price_table_name": table.name if table else None,
+        "warehouse_id": order.warehouse_id,
+        "warehouse_name": order.warehouse_name,
         "order_date": order.order_date,
         "payment_due_date": order.payment_due_date,
         "delivery_date": order.delivery_date,
@@ -773,12 +791,15 @@ def build_order_items(db: Session, order: SalesOrder, table: PriceTable, payload
         item_profit = money_round(item_total - item_total_cost)
         item_profitability = profitability_percent(item_total, item_profit)
         item_commercial_status = commercial_status_for_price(negotiated_unit_price, min_unit_price, max_unit_price)
+        warehouse = resolve_warehouse(db, payload_item.warehouse_id or order.warehouse_id)
         db.add(
             SalesOrderItem(
                 order_id=order.id,
                 product_id=product.id,
                 product_sku=product.sku,
                 product_name=product.name,
+                warehouse_id=warehouse["id"] if warehouse else None,
+                warehouse_name=warehouse["name"] if warehouse else None,
                 quantity=payload_item.quantity,
                 cancelled_quantity=Decimal("0"),
                 base_unit_price=price_item.base_price,
@@ -860,6 +881,17 @@ def list_customers(db: Session = Depends(get_db)):
         return [*shared_rows, *local_rows]
 
     return local_rows
+
+
+@app.get("/warehouses", tags=["Locais de estoque"])
+def list_warehouses(db: Session = Depends(get_db)):
+    rows = db.execute(
+        text("SELECT id, code, name, active FROM flow_warehouses ORDER BY code ASC, name ASC")
+    ).mappings().all()
+    return [
+        {"id": row["id"], "code": row["code"], "name": f"{row['code']} - {row['name']}", "active": row["active"]}
+        for row in rows
+    ]
 
 
 @app.post("/customers", response_model=CustomerRead, status_code=status.HTTP_201_CREATED, tags=["Clientes"])
@@ -1535,6 +1567,7 @@ def create_order(payload: SalesOrderCreate, db: Session = Depends(get_db)):
     if not table.active:
         raise HTTPException(status_code=400, detail="Tabela de preco inativa")
     customer = resolve_customer(db, payload.customer_id)
+    warehouse = resolve_warehouse(db, payload.warehouse_id)
     order = SalesOrder(
         order_number=next_order_number(db),
         order_type=normalize_order_type(payload.order_type),
@@ -1542,6 +1575,8 @@ def create_order(payload: SalesOrderCreate, db: Session = Depends(get_db)):
         customer_external_id=customer["external_id"],
         customer_name=customer["name"],
         price_table_id=table.id,
+        warehouse_id=warehouse["id"] if warehouse else None,
+        warehouse_name=warehouse["name"] if warehouse else None,
         order_date=payload.order_date,
         payment_due_date=payload.payment_due_date,
         delivery_date=payload.delivery_date,
@@ -1621,6 +1656,7 @@ def update_order(order_id: int, payload: SalesOrderUpdate, db: Session = Depends
     if not table.active:
         raise HTTPException(status_code=400, detail="Tabela de preco inativa")
     customer = resolve_customer(db, payload.customer_id)
+    warehouse = resolve_warehouse(db, payload.warehouse_id)
     for item in db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all():
         db.delete(item)
     db.flush()
@@ -1629,6 +1665,8 @@ def update_order(order_id: int, payload: SalesOrderUpdate, db: Session = Depends
     order.customer_external_id = customer["external_id"]
     order.customer_name = customer["name"]
     order.price_table_id = table.id
+    order.warehouse_id = warehouse["id"] if warehouse else None
+    order.warehouse_name = warehouse["name"] if warehouse else None
     order.order_date = payload.order_date
     order.payment_due_date = payload.payment_due_date
     order.delivery_date = payload.delivery_date
