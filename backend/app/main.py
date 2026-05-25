@@ -92,6 +92,8 @@ async def startup():
     with engine.begin() as connection:
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS purchase_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS cost_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
+        connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS default_warehouse_id INTEGER"))
+        connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS default_warehouse_name VARCHAR(160)"))
         connection.execute(text("ALTER TABLE sf_customer_links ADD COLUMN IF NOT EXISTS customer_profile_id INTEGER"))
         connection.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS credit_limit NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS total_cost_amount NUMERIC(14, 2) NOT NULL DEFAULT 0"))
@@ -309,6 +311,8 @@ def product_to_read(db: Session, item: Product) -> dict:
         "purchase_price": item.purchase_price,
         "cost_price": item.cost_price,
         "sale_price": item.sale_price,
+        "default_warehouse_id": item.default_warehouse_id,
+        "default_warehouse_name": item.default_warehouse_name,
         "description": item.description,
         "active": item.active,
     }
@@ -488,12 +492,12 @@ def resolve_warehouse(db: Session, warehouse_id: int | None) -> dict | None:
     if not warehouse_id:
         return None
     row = db.execute(
-        text("SELECT id, name, active FROM flow_warehouses WHERE id = :id"),
+        text("SELECT id, code, name, active FROM flow_warehouses WHERE id = :id"),
         {"id": warehouse_id},
     ).mappings().first()
     if not row or not row["active"]:
         raise HTTPException(status_code=400, detail="Local de estoque inativo ou nao encontrado")
-    return {"id": int(row["id"]), "name": row["name"]}
+    return {"id": int(row["id"]), "name": f"{row['code']} - {row['name']}"}
 
 
 def financial_authorization_reasons(db: Session, order: SalesOrder) -> list[dict]:
@@ -606,8 +610,6 @@ def order_to_read(db: Session, order: SalesOrder) -> dict:
         "customer_name": order.customer_name,
         "price_table_id": order.price_table_id,
         "price_table_name": table.name if table else None,
-        "warehouse_id": order.warehouse_id,
-        "warehouse_name": order.warehouse_name,
         "order_date": order.order_date,
         "payment_due_date": order.payment_due_date,
         "delivery_date": order.delivery_date,
@@ -791,7 +793,7 @@ def build_order_items(db: Session, order: SalesOrder, table: PriceTable, payload
         item_profit = money_round(item_total - item_total_cost)
         item_profitability = profitability_percent(item_total, item_profit)
         item_commercial_status = commercial_status_for_price(negotiated_unit_price, min_unit_price, max_unit_price)
-        warehouse = resolve_warehouse(db, payload_item.warehouse_id or order.warehouse_id)
+        warehouse = resolve_warehouse(db, payload_item.warehouse_id or product.default_warehouse_id)
         db.add(
             SalesOrderItem(
                 order_id=order.id,
@@ -1236,6 +1238,7 @@ def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Preco de compra e custo nao podem ser negativos")
     get_group_or_404(db, payload.product_group_id)
     get_class_or_404(db, payload.product_class_id)
+    warehouse = resolve_warehouse(db, payload.default_warehouse_id)
     item = Product(
         product_group_id=payload.product_group_id,
         product_class_id=payload.product_class_id,
@@ -1245,6 +1248,8 @@ def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
         purchase_price=payload.purchase_price,
         cost_price=payload.cost_price,
         sale_price=payload.sale_price,
+        default_warehouse_id=warehouse["id"] if warehouse else None,
+        default_warehouse_name=warehouse["name"] if warehouse else None,
         description=payload.description,
         active=payload.active,
     )
@@ -1269,6 +1274,7 @@ def update_product(product_id: int, payload: ProductUpdate, db: Session = Depend
         raise HTTPException(status_code=400, detail="Preco de compra e custo nao podem ser negativos")
     get_group_or_404(db, payload.product_group_id)
     get_class_or_404(db, payload.product_class_id)
+    warehouse = resolve_warehouse(db, payload.default_warehouse_id)
     item.product_group_id = payload.product_group_id
     item.product_class_id = payload.product_class_id
     item.sku = sku
@@ -1277,6 +1283,8 @@ def update_product(product_id: int, payload: ProductUpdate, db: Session = Depend
     item.purchase_price = payload.purchase_price
     item.cost_price = payload.cost_price
     item.sale_price = payload.sale_price
+    item.default_warehouse_id = warehouse["id"] if warehouse else None
+    item.default_warehouse_name = warehouse["name"] if warehouse else None
     item.description = payload.description
     item.active = payload.active
     db.commit()
@@ -1567,7 +1575,6 @@ def create_order(payload: SalesOrderCreate, db: Session = Depends(get_db)):
     if not table.active:
         raise HTTPException(status_code=400, detail="Tabela de preco inativa")
     customer = resolve_customer(db, payload.customer_id)
-    warehouse = resolve_warehouse(db, payload.warehouse_id)
     order = SalesOrder(
         order_number=next_order_number(db),
         order_type=normalize_order_type(payload.order_type),
@@ -1575,8 +1582,6 @@ def create_order(payload: SalesOrderCreate, db: Session = Depends(get_db)):
         customer_external_id=customer["external_id"],
         customer_name=customer["name"],
         price_table_id=table.id,
-        warehouse_id=warehouse["id"] if warehouse else None,
-        warehouse_name=warehouse["name"] if warehouse else None,
         order_date=payload.order_date,
         payment_due_date=payload.payment_due_date,
         delivery_date=payload.delivery_date,
@@ -1656,7 +1661,6 @@ def update_order(order_id: int, payload: SalesOrderUpdate, db: Session = Depends
     if not table.active:
         raise HTTPException(status_code=400, detail="Tabela de preco inativa")
     customer = resolve_customer(db, payload.customer_id)
-    warehouse = resolve_warehouse(db, payload.warehouse_id)
     for item in db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all():
         db.delete(item)
     db.flush()
@@ -1665,8 +1669,6 @@ def update_order(order_id: int, payload: SalesOrderUpdate, db: Session = Depends
     order.customer_external_id = customer["external_id"]
     order.customer_name = customer["name"]
     order.price_table_id = table.id
-    order.warehouse_id = warehouse["id"] if warehouse else None
-    order.warehouse_name = warehouse["name"] if warehouse else None
     order.order_date = payload.order_date
     order.payment_due_date = payload.payment_due_date
     order.delivery_date = payload.delivery_date

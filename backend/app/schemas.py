@@ -59,6 +59,7 @@ class ProductBase(BaseModel):
     purchase_price: Decimal = Decimal("0.00")
     cost_price: Decimal = Decimal("0.00")
     sale_price: Decimal = Decimal("0.00")
+    default_warehouse_id: int | None = None
     description: str | None = None
     active: bool = True
 
@@ -75,6 +76,7 @@ class ProductRead(ProductBase):
     id: int
     product_group_name: str | None = None
     product_class_name: str | None = None
+    default_warehouse_name: str | None = None
 
     class Config:
         from_attributes = True
@@ -265,7 +267,6 @@ class SalesOrderItemCancel(BaseModel):
 class SalesOrderCreate(BaseModel):
     customer_id: str
     price_table_id: int
-    warehouse_id: int | None = None
     order_type: str = "sale"
     order_date: date
     payment_due_date: date
@@ -325,8 +326,6 @@ class SalesOrderRead(BaseModel):
     customer_name: str
     price_table_id: int
     price_table_name: str | None = None
-    warehouse_id: int | None = None
-    warehouse_name: str | None = None
     order_date: date
     payment_due_date: date
     delivery_date: date | None = None

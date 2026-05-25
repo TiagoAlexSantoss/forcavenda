@@ -13,11 +13,11 @@ const emptyCustomer = { customer_profile_id: "", name: "", document_number: "", 
 const emptyCustomerProfile = { code: "", name: "", description: "", max_inactive_days: "180", max_overdue_days: "0", block_without_movement: false, block_overdue_titles: true, active: true };
 const emptyGroup = { code: "", name: "", description: "", active: true };
 const emptyClass = { product_group_id: "", code: "", name: "", description: "", active: true };
-const emptyProduct = { product_group_id: "", product_class_id: "", sku: "", name: "", unit: "UN", purchase_price: "0.00", cost_price: "0.00", sale_price: "0.00", description: "", active: true };
+const emptyProduct = { product_group_id: "", product_class_id: "", sku: "", name: "", unit: "UN", purchase_price: "0.00", cost_price: "0.00", sale_price: "0.00", default_warehouse_id: "", description: "", active: true };
 const emptyPriceTable = { code: "", name: "", correction_mode: "outside", monthly_rate: "0.00", base_date: today, active: true };
 const emptyPriceItem = { product_id: "", base_price: "0.00", margin_percent: "5.00", active: true };
 const emptyPriceTier = { min_quantity: "1.00", discount_percent: "0.00", active: true };
-const emptyOrder = { customer_id: "", price_table_id: "", warehouse_id: "", order_type: "sale", order_date: today, payment_due_date: today, delivery_date: "", notes: "" };
+const emptyOrder = { customer_id: "", price_table_id: "", order_type: "sale", order_date: today, payment_due_date: today, delivery_date: "", notes: "" };
 const emptyOrderItem = { product_id: "", warehouse_id: "", quantity: "1", negotiated_unit_price: "" };
 
 const MESSAGE_TYPES = {
@@ -175,7 +175,7 @@ function App() {
         {message && <div className={`message ${message.type}`}>{message.text}</div>}
 
         {activeTab === "home" && <HomePage orders={orders} customers={customers} products={products} priceTables={priceTables} customerMonitoring={customerMonitoring} openTab={openTab} />}
-        {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} run={run} />}
+        {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} warehouses={warehouses} run={run} />}
         {activeTab === "priceTables" && <PriceTablesBrowser priceTables={priceTables} products={products} run={run} />}
         {activeTab === "groups" && <SimpleCatalogBrowser title="Grupos de produtos" eyebrow="Cadastros" endpoint="/product-groups" items={groups} template={emptyGroup} run={run} />}
         {activeTab === "classes" && <ClassesBrowser classes={classes} groups={groups} run={run} />}
@@ -286,13 +286,13 @@ function HomeCard({ label, value, tone, onClick }) {
   );
 }
 
-function ProductsBrowser({ products, groups, classes, run }) {
+function ProductsBrowser({ products, groups, classes, warehouses, run }) {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
   const rows = useMemo(() => filterRows(products, query, ["sku", "name", "product_group_name", "product_class_name"]), [products, query]);
 
   function toForm(item) {
-    return item ? { product_group_id: item.product_group_id || "", product_class_id: item.product_class_id || "", sku: item.sku, name: item.name, unit: item.unit, purchase_price: String(item.purchase_price || "0.00"), cost_price: String(item.cost_price || "0.00"), sale_price: String(item.sale_price || "0.00"), description: item.description || "", active: item.active } : emptyProduct;
+    return item ? { product_group_id: item.product_group_id || "", product_class_id: item.product_class_id || "", sku: item.sku, name: item.name, unit: item.unit, purchase_price: String(item.purchase_price || "0.00"), cost_price: String(item.cost_price || "0.00"), sale_price: String(item.sale_price || "0.00"), default_warehouse_id: item.default_warehouse_id || "", description: item.description || "", active: item.active } : emptyProduct;
   }
 
   async function save(form, item) {
@@ -305,6 +305,7 @@ function ProductsBrowser({ products, groups, classes, run }) {
       purchase_price: Number(form.purchase_price || 0),
       cost_price: Number(form.cost_price || 0),
       sale_price: Number(form.sale_price || 0),
+      default_warehouse_id: form.default_warehouse_id ? Number(form.default_warehouse_id) : null,
       description: form.description.trim() || null,
       active: form.active,
     };
@@ -314,22 +315,23 @@ function ProductsBrowser({ products, groups, classes, run }) {
 
   return (
     <Browser title="Produtos" eyebrow="Cadastros" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: toForm(null) })}>
-      <DataTable columns={["SKU", "Produto", "Grupo", "Compra", "Custo", "Venda ref.", "Status", "Acoes"]} rows={rows.map((item) => [
+      <DataTable columns={["SKU", "Produto", "Grupo", "Local padrao", "Compra", "Custo", "Venda ref.", "Status", "Acoes"]} rows={rows.map((item) => [
         item.sku,
         item.name,
         item.product_group_name || "-",
+        item.default_warehouse_name || "-",
         money.format(Number(item.purchase_price || 0)),
         money.format(Number(item.cost_price || 0)),
         money.format(Number(item.sale_price || 0)),
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/products/${item.id}`))} />,
       ])} />
-      {modal && <ProductModal state={modal} setState={setModal} groups={groups} classes={classes} onSave={save} />}
+      {modal && <ProductModal state={modal} setState={setModal} groups={groups} classes={classes} warehouses={warehouses} onSave={save} />}
     </Browser>
   );
 }
 
-function ProductModal({ state, setState, groups, classes, onSave }) {
+function ProductModal({ state, setState, groups, classes, warehouses, onSave }) {
   const { item, form } = state;
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
   return (
@@ -339,6 +341,7 @@ function ProductModal({ state, setState, groups, classes, onSave }) {
         <Field label="Produto"><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
         <Field label="Grupo"><Select value={form.product_group_id} onChange={(v) => update("product_group_id", v)} options={groups} empty="Sem grupo" /></Field>
         <Field label="Classe"><Select value={form.product_class_id} onChange={(v) => update("product_class_id", v)} options={classes} empty="Sem classe" /></Field>
+        <Field label="Local padrao"><Select value={form.default_warehouse_id} onChange={(v) => update("default_warehouse_id", v)} options={warehouses} empty="Sem local padrao" /></Field>
         <Field label="Unidade"><input value={form.unit} onChange={(e) => update("unit", e.target.value.toUpperCase())} /></Field>
         <Field label="Preco compra"><input type="number" min="0" step="0.01" value={form.purchase_price} onChange={(e) => update("purchase_price", e.target.value)} /></Field>
         <Field label="Custo"><input type="number" min="0" step="0.01" value={form.cost_price} onChange={(e) => update("cost_price", e.target.value)} /></Field>
@@ -857,11 +860,11 @@ function OrdersBrowser({ orders, customers, products, priceTables, warehouses, r
 
   function toForm(item) {
     if (!item) return emptyOrder;
-    return { customer_id: `${item.customer_source}:${item.customer_external_id}`, price_table_id: item.price_table_id || "", warehouse_id: item.warehouse_id || "", order_type: item.order_type || "sale", order_date: item.order_date, payment_due_date: item.payment_due_date, delivery_date: item.delivery_date || "", notes: item.notes || "" };
+    return { customer_id: `${item.customer_source}:${item.customer_external_id}`, price_table_id: item.price_table_id || "", order_type: item.order_type || "sale", order_date: item.order_date, payment_due_date: item.payment_due_date, delivery_date: item.delivery_date || "", notes: item.notes || "" };
   }
 
   async function save(form, item) {
-    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), warehouse_id: form.warehouse_id ? Number(form.warehouse_id) : null, order_type: form.order_type || "sale", order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: item ? item.items.map((row) => ({ product_id: row.product_id, warehouse_id: row.warehouse_id || null, quantity: row.quantity, negotiated_unit_price: row.negotiated_unit_price })) : [] };
+    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_type: form.order_type || "sale", order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: item ? item.items.map((row) => ({ product_id: row.product_id, warehouse_id: row.warehouse_id || null, quantity: row.quantity, negotiated_unit_price: row.negotiated_unit_price })) : [] };
     await run(() => item ? api.put(`/orders/${item.id}`, payload) : api.post("/orders", payload));
     setModal(null);
   }
@@ -1067,6 +1070,7 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
   const selectedPriceTable = priceTables.find((table) => Number(table.id) === Number(form.price_table_id));
   const correctionHelp = priceCorrectionHelp(preview, selectedPriceTable);
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
+  const productDefaultWarehouse = (productId) => products.find((product) => String(product.id) === String(productId))?.default_warehouse_id || "";
 
   useEffect(() => {
     if (!form.price_table_id || !itemForm.product_id || !form.payment_due_date) {
@@ -1082,7 +1086,7 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
   }, [form.price_table_id, itemForm.product_id, itemForm.quantity, form.payment_due_date]);
 
   async function saveHeader() {
-    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), warehouse_id: form.warehouse_id ? Number(form.warehouse_id) : null, order_type: form.order_type || "sale", order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: currentOrder?.items?.map((row) => ({ product_id: row.product_id, warehouse_id: row.warehouse_id || null, quantity: Number(row.quantity || 0), negotiated_unit_price: Number(row.negotiated_unit_price || row.corrected_unit_price || 0) })) || [] };
+    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_type: form.order_type || "sale", order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: currentOrder?.items?.map((row) => ({ product_id: row.product_id, warehouse_id: row.warehouse_id || null, quantity: Number(row.quantity || 0), negotiated_unit_price: Number(row.negotiated_unit_price || row.corrected_unit_price || 0) })) || [] };
     const response = currentOrder
       ? await api.put(`/orders/${currentOrder.id}`, payload)
       : await api.post("/orders", { ...payload, items: [] });
@@ -1104,7 +1108,7 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
 
   async function saveOrderItem() {
     if (!currentOrder?.id || !itemForm.product_id) return;
-    const payload = { product_id: Number(itemForm.product_id), warehouse_id: itemForm.warehouse_id ? Number(itemForm.warehouse_id) : (form.warehouse_id ? Number(form.warehouse_id) : null), quantity: Number(itemForm.quantity || 0), negotiated_unit_price: itemForm.negotiated_unit_price ? Number(itemForm.negotiated_unit_price) : null };
+    const payload = { product_id: Number(itemForm.product_id), warehouse_id: itemForm.warehouse_id ? Number(itemForm.warehouse_id) : null, quantity: Number(itemForm.quantity || 0), negotiated_unit_price: itemForm.negotiated_unit_price ? Number(itemForm.negotiated_unit_price) : null };
     if (editingItem) await api.put(`/orders/${currentOrder.id}/items/${editingItem.id}`, payload);
     else await api.post(`/orders/${currentOrder.id}/items`, payload);
     setEditingItem(null);
@@ -1137,14 +1141,13 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
 
   function editOrderItem(row) {
     setEditingItem(row);
-    setItemForm({ product_id: row.product_id || "", warehouse_id: row.warehouse_id || form.warehouse_id || "", quantity: String(row.quantity || "1"), negotiated_unit_price: String(row.negotiated_unit_price || row.corrected_unit_price || "") });
+    setItemForm({ product_id: row.product_id || "", warehouse_id: row.warehouse_id || productDefaultWarehouse(row.product_id), quantity: String(row.quantity || "1"), negotiated_unit_price: String(row.negotiated_unit_price || row.corrected_unit_price || "") });
   }
 
   return (
     <Modal title={currentOrder ? `Editar pedido ${currentOrder.order_number}` : "Novo pedido"} onClose={() => setState(null)} onSubmit={() => onSave(form, currentOrder)}>
       <div className="modal-grid">
         <Field label="Cliente" wide><Select value={form.customer_id} onChange={(v) => update("customer_id", v)} options={customers} empty="Selecione" required labelKey="name" valueKey="id" /></Field>
-        <Field label="Local padrao"><Select value={form.warehouse_id} onChange={(v) => update("warehouse_id", v)} options={warehouses} empty="Selecione" /></Field>
         <Field label="Tipo"><select value={form.order_type || "sale"} onChange={(event) => update("order_type", event.target.value)}><option value="sale">Pedido de venda</option><option value="purchase">Pedido de compra</option></select></Field>
         <Field label="Tabela"><Select value={form.price_table_id} onChange={(v) => update("price_table_id", v)} options={priceTables} empty="Selecione" required /></Field>
         <Field label="Prazo pagamento"><input type="date" value={form.payment_due_date} onChange={(e) => update("payment_due_date", e.target.value)} /></Field>
@@ -1164,7 +1167,6 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
             <span>Status <OrderStatus status={currentOrder.status} overdue={isOrderDeliveryOverdue(currentOrder)} /></span>
             <span>Pagamento <strong>{currentOrder.payment_due_date}</strong></span>
             <span>Entrega <strong>{currentOrder.delivery_date || "Nao informada"}</strong></span>
-            <span>Local padrao <strong>{currentOrder.warehouse_name || "-"}</strong></span>
             <span>Cliente <strong>{currentOrder.customer_name}</strong></span>
           </div>
         )}
@@ -1180,8 +1182,8 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
         {currentOrder?.id && (
           <>
             <div className="detail-form">
-              <Field label="Produto" wide><Select value={itemForm.product_id} onChange={(v) => setItemForm({ ...itemForm, product_id: v, negotiated_unit_price: "" })} options={products} empty="Selecione" /></Field>
-              <Field label="Local"><Select value={itemForm.warehouse_id || form.warehouse_id} onChange={(v) => setItemForm({ ...itemForm, warehouse_id: v })} options={warehouses} empty="Padrao do pedido" /></Field>
+              <Field label="Produto" wide><Select value={itemForm.product_id} onChange={(v) => setItemForm({ ...itemForm, product_id: v, warehouse_id: productDefaultWarehouse(v), negotiated_unit_price: "" })} options={products} empty="Selecione" /></Field>
+              <Field label="Local"><Select value={itemForm.warehouse_id} onChange={(v) => setItemForm({ ...itemForm, warehouse_id: v })} options={warehouses} empty="Sem local" /></Field>
               <Field label="Quantidade"><input type="number" min="0.0001" step="0.0001" value={itemForm.quantity} onChange={(e) => setItemForm({ ...itemForm, quantity: e.target.value, negotiated_unit_price: "" })} /></Field>
               <Field label="Valor negociado"><input type="number" min="0" step="0.01" value={itemForm.negotiated_unit_price} onChange={(e) => setItemForm({ ...itemForm, negotiated_unit_price: e.target.value })} /></Field>
               <div className="form-actions">
@@ -1191,7 +1193,7 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
             </div>
             <DataTable columns={["Produto", "Local", "Qtd.", "Cancel.", "Preco tabela", "Negociado", "Comercial", "Total", "Lucro", "Acoes"]} rows={(currentOrder.items || []).map((row) => [
               `${row.product_sku} - ${row.product_name}`,
-              row.warehouse_name || currentOrder.warehouse_name || "-",
+              row.warehouse_name || "-",
               decimal.format(Number(row.quantity || 0)),
               decimal.format(Number(row.cancelled_quantity || 0)),
               money.format(Number(row.corrected_unit_price || 0)),

@@ -44,6 +44,8 @@ class Product(Base):
     purchase_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     cost_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     sale_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    default_warehouse_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    default_warehouse_name: Mapped[str | None] = mapped_column(String(160), nullable=True)
     description: Mapped[str | None] = mapped_column(String(800), nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
