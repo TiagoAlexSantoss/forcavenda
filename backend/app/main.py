@@ -12,6 +12,7 @@ from app.database import Base, engine, get_db
 from app.models import (
     CustomerLink,
     CustomerProfile,
+    CustomerProfilePaymentRule,
     PriceTable,
     PriceTableItem,
     PriceTableItemTier,
@@ -20,6 +21,7 @@ from app.models import (
     ProductGroup,
     SalesOrder,
     SalesOrderItem,
+    SalesOrderPayment,
 )
 from app.schemas import (
     CustomerCreate,
@@ -47,13 +49,17 @@ from app.schemas import (
     ProductGroupCreate,
     ProductGroupRead,
     ProductGroupUpdate,
+    ProductLotConfigUpdate,
     ProductRead,
     ProductUpdate,
     SalesOrderCreate,
     SalesOrderItemCancel,
     SalesOrderItemCreate,
     SalesOrderRead,
+    SalesOrderPaymentCreate,
     SalesOrderUpdate,
+    StockBalanceRead,
+    StockMovementRead,
 )
 
 
@@ -94,6 +100,8 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS cost_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS default_warehouse_id INTEGER"))
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS default_warehouse_name VARCHAR(160)"))
+        connection.execute(text("CREATE TABLE IF NOT EXISTS flow_product_lot_configs (id SERIAL PRIMARY KEY, product_source VARCHAR(40) NOT NULL, product_external_id VARCHAR(80) NOT NULL, controls_lot BOOLEAN NOT NULL DEFAULT FALSE, lot_type VARCHAR(30) NOT NULL DEFAULT 'none', updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_flow_product_lot_configs_product_external_id ON flow_product_lot_configs (product_external_id)"))
         connection.execute(text("ALTER TABLE sf_customer_links ADD COLUMN IF NOT EXISTS customer_profile_id INTEGER"))
         connection.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS credit_limit NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS total_cost_amount NUMERIC(14, 2) NOT NULL DEFAULT 0"))
@@ -299,6 +307,7 @@ def class_to_read(db: Session, item: ProductClass) -> dict:
 def product_to_read(db: Session, item: Product) -> dict:
     group = db.get(ProductGroup, item.product_group_id) if item.product_group_id else None
     product_class = db.get(ProductClass, item.product_class_id) if item.product_class_id else None
+    lot_config = product_lot_config(db, str(item.id))
     return {
         "id": item.id,
         "product_group_id": item.product_group_id,
@@ -313,9 +322,29 @@ def product_to_read(db: Session, item: Product) -> dict:
         "sale_price": item.sale_price,
         "default_warehouse_id": item.default_warehouse_id,
         "default_warehouse_name": item.default_warehouse_name,
+        "controls_lot": bool(lot_config["controls_lot"]) if lot_config else False,
+        "lot_type": lot_config["lot_type"] if lot_config else "none",
         "description": item.description,
         "active": item.active,
     }
+
+
+def product_lot_config(db: Session, product_id: str) -> dict | None:
+    try:
+        row = db.execute(
+            text(
+                """
+                SELECT controls_lot, lot_type
+                FROM flow_product_lot_configs
+                WHERE product_source = 'easysales' AND product_external_id = :product_id
+                """
+            ),
+            {"product_id": str(product_id)},
+        ).mappings().first()
+    except SQLAlchemyError:
+        db.rollback()
+        return None
+    return dict(row) if row else None
 
 
 def normalize_correction_mode(value: str) -> str:
@@ -441,6 +470,38 @@ def commercial_reason_for_price(unit_price: Decimal, min_price: Decimal, max_pri
 def effective_quantity(item: SalesOrderItem) -> Decimal:
     value = Decimal(str(item.quantity or 0)) - Decimal(str(item.cancelled_quantity or 0))
     return max(value, Decimal("0"))
+
+
+def linked_quantity_for_order_item(db: Session, item_id: int) -> Decimal:
+    try:
+        value = db.scalar(
+            text(
+                """
+                SELECT COALESCE(SUM(quantity), 0)
+                FROM flow_document_link_ledger
+                WHERE source_system = 'easysales'
+                  AND source_document_kind = 'sales_order'
+                  AND source_item_id = :item_id
+                """
+            ),
+            {"item_id": str(item_id)},
+        )
+    except SQLAlchemyError:
+        value = Decimal("0")
+    return Decimal(str(value or 0))
+
+
+def ensure_order_item_has_editable_balance(db: Session, item: SalesOrderItem, new_quantity: Decimal | None = None, deleting: bool = False):
+    linked_quantity = linked_quantity_for_order_item(db, item.id)
+    current_quantity = effective_quantity(item)
+    if linked_quantity <= 0:
+        return
+    if current_quantity - linked_quantity <= 0:
+        raise HTTPException(status_code=400, detail="Item sem saldo do pedido para edicao")
+    if deleting:
+        raise HTTPException(status_code=400, detail="Item com baixa vinculada no Flow nao pode ser excluido")
+    if new_quantity is not None and Decimal(str(new_quantity)) < linked_quantity:
+        raise HTTPException(status_code=400, detail="Quantidade do item nao pode ficar menor que a quantidade ja baixada no Flow")
 
 
 def recalculate_order_item(item: SalesOrderItem):
@@ -601,6 +662,7 @@ def order_authorization_reasons(db: Session, order: SalesOrder, items: list[Sale
 def order_to_read(db: Session, order: SalesOrder) -> dict:
     table = db.get(PriceTable, order.price_table_id)
     items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id).order_by(SalesOrderItem.id.asc())).all()
+    payment_suggestions = db.scalars(select(SalesOrderPayment).where(SalesOrderPayment.order_id == order.id).order_by(SalesOrderPayment.due_date.asc(), SalesOrderPayment.id.asc())).all()
     return {
         "id": order.id,
         "order_number": order.order_number,
@@ -624,8 +686,54 @@ def order_to_read(db: Session, order: SalesOrder) -> dict:
         "profitability_percent": order.profitability_percent,
         "notes": order.notes,
         "authorization_reasons": order_authorization_reasons(db, order, items),
+        "payment_suggestions": payment_suggestions,
         "items": items,
     }
+
+
+def profile_payment_rules(db: Session, profile_id: int) -> list[CustomerProfilePaymentRule]:
+    return db.scalars(
+        select(CustomerProfilePaymentRule)
+        .where(CustomerProfilePaymentRule.customer_profile_id == profile_id)
+        .order_by(CustomerProfilePaymentRule.payment_method.asc(), CustomerProfilePaymentRule.max_installments.asc(), CustomerProfilePaymentRule.max_total_days.asc())
+    ).all()
+
+
+def customer_profile_to_read(db: Session, item: CustomerProfile) -> dict:
+    return {
+        "id": item.id,
+        "code": item.code,
+        "name": item.name,
+        "description": item.description,
+        "max_inactive_days": item.max_inactive_days,
+        "max_overdue_days": item.max_overdue_days,
+        "block_without_movement": item.block_without_movement,
+        "block_overdue_titles": item.block_overdue_titles,
+        "active": item.active,
+        "payment_rules": profile_payment_rules(db, item.id),
+    }
+
+
+def replace_profile_payment_rules(db: Session, profile: CustomerProfile, rules):
+    allowed_methods = {"avista", "parcelado", "adiantamento"}
+    for existing in profile_payment_rules(db, profile.id):
+        db.delete(existing)
+    for rule in rules:
+        if rule.payment_method not in allowed_methods:
+            raise HTTPException(status_code=400, detail="Condicao de pagamento invalida no perfil")
+        if rule.max_installments <= 0:
+            raise HTTPException(status_code=400, detail="Quantidade maxima de parcelas deve ser maior que zero")
+        if rule.max_total_days < 0:
+            raise HTTPException(status_code=400, detail="Dias maximos de parcelamento nao pode ser negativo")
+        db.add(
+            CustomerProfilePaymentRule(
+                customer_profile_id=profile.id,
+                payment_method=rule.payment_method,
+                max_installments=rule.max_installments,
+                max_total_days=rule.max_total_days,
+                active=rule.active,
+            )
+        )
 
 
 def recalculate_order_totals(db: Session, order: SalesOrder):
@@ -642,6 +750,22 @@ def recalculate_order_totals(db: Session, order: SalesOrder):
         order.status = "cancelled"
         order.approval_stage = "cancelled"
         order.approval_notes = "Pedido cancelado integralmente pelos itens."
+
+
+def validate_payment_suggestions(order: SalesOrder, payload: list[SalesOrderPaymentCreate]):
+    if not payload:
+        raise HTTPException(status_code=400, detail="Informe ao menos uma sugestao de pagamento")
+    total = Decimal("0")
+    allowed_methods = {"avista", "parcelado", "adiantamento"}
+    for item in payload:
+        if item.payment_method not in allowed_methods:
+            raise HTTPException(status_code=400, detail="Condicao de pagamento invalida")
+        amount = Decimal(str(item.amount or 0))
+        if amount <= 0:
+            raise HTTPException(status_code=400, detail="Valor da parcela deve ser maior que zero")
+        total += amount
+    if money_round(total) != money_round(Decimal(str(order.total_amount or 0))):
+        raise HTTPException(status_code=400, detail="Total das sugestoes de pagamento deve fechar com o total do pedido")
 
 
 def easyfinance_customer_financial(db: Session, external_id: str) -> dict:
@@ -722,6 +846,40 @@ def easyfinance_customer_financial(db: Session, external_id: str) -> dict:
     }
 
 
+def payment_rule_notes(db: Session, order: SalesOrder, profile: CustomerProfile | None) -> list[str]:
+    if not profile:
+        return ["Cliente sem perfil comercial para validar condicao de pagamento."]
+    rules = [
+        rule for rule in profile_payment_rules(db, profile.id)
+        if rule.active
+    ]
+    if not rules:
+        return ["Perfil comercial sem condicoes de pagamento liberadas."]
+    suggestions = db.scalars(select(SalesOrderPayment).where(SalesOrderPayment.order_id == order.id)).all()
+    if not suggestions:
+        return ["Pedido sem condicao de pagamento registrada."]
+    notes: list[str] = []
+    methods = sorted({item.payment_method for item in suggestions})
+    for method in methods:
+        rows = [item for item in suggestions if item.payment_method == method]
+        installments = len(rows)
+        max_total_days = max(((item.due_date - order.order_date).days for item in rows), default=0)
+        max_total_days = max(max_total_days, 0)
+        accepted = any(
+            rule.payment_method == method
+            and installments <= rule.max_installments
+            and max_total_days <= rule.max_total_days
+            for rule in rules
+        )
+        if not accepted:
+            notes.append(f"Condicao de pagamento {payment_method_label(method)} em {installments} parcela(s) e {max_total_days} dia(s) nao liberada para o perfil {profile.name}.")
+    return notes
+
+
+def payment_method_label(method: str) -> str:
+    return {"avista": "a vista", "parcelado": "parcelado", "adiantamento": "adiantamento"}.get(method, method)
+
+
 def evaluate_financial_approval(db: Session, order: SalesOrder) -> tuple[bool, list[str]]:
     notes: list[str] = []
     profile_id = resolve_customer(db, f"{order.customer_source}:{order.customer_external_id}").get("profile_id")
@@ -739,6 +897,7 @@ def evaluate_financial_approval(db: Session, order: SalesOrder) -> tuple[bool, l
         inactive_days = financial["days_without_movement"]
         if inactive_days is None or inactive_days > profile.max_inactive_days:
             notes.append(f"Cliente sem movimentacao dentro de {profile.max_inactive_days} dia(s).")
+    notes.extend(payment_rule_notes(db, order, profile))
     return len(notes) == 0, notes or ["Aprovacao financeira sem restricoes."]
 
 
@@ -765,61 +924,106 @@ def refresh_order_approval_stage(db: Session, order: SalesOrder):
         order.approval_notes = "Itens aprovados comercialmente."
 
 
+def apply_order_approval_flow(db: Session, order: SalesOrder):
+    recalculate_order_totals(db, order)
+    if Decimal(str(order.total_amount or 0)) <= 0:
+        raise HTTPException(status_code=400, detail="Pedido sem itens ou total zerado")
+    has_payment_suggestion = db.scalar(select(SalesOrderPayment).where(SalesOrderPayment.order_id == order.id))
+    if not has_payment_suggestion:
+        raise HTTPException(status_code=400, detail="Registre a condicao de pagamento antes de enviar para aprovacao.")
+    allowed, notes = evaluate_financial_approval(db, order)
+    if not allowed:
+        order.status = "financial_blocked"
+        order.approval_stage = "financial"
+        order.financial_approved_at = None
+        order.commercial_approved_at = None
+        order.approval_notes = " ".join(notes)
+        return
+    order.financial_approved_at = datetime.utcnow()
+    pending_commercial = db.scalar(
+        select(SalesOrderItem).where(
+            SalesOrderItem.order_id == order.id,
+            SalesOrderItem.commercial_status == "pending",
+            SalesOrderItem.cancellation_status != "cancelled",
+        )
+    )
+    if pending_commercial:
+        order.status = "pending_commercial"
+        order.approval_stage = "commercial"
+        order.commercial_approved_at = None
+        order.approval_notes = "Pedido aprovado financeiramente. Existem item(ns) pendentes de autorizacao comercial."
+        return
+    order.status = "approved"
+    order.approval_stage = "approved"
+    order.commercial_approved_at = datetime.utcnow()
+    order.approval_notes = "Pedido aprovado automaticamente sem pendencias financeiras ou comerciais."
+
+
+def revalidate_order_if_submitted(db: Session, order: SalesOrder, was_submitted: bool):
+    if was_submitted and order.status not in {"cancelled", "rejected"}:
+        apply_order_approval_flow(db, order)
+    else:
+        refresh_order_approval_stage(db, order)
+
+
+def apply_payload_to_order_item(db: Session, order: SalesOrder, table: PriceTable, payload_item, item: SalesOrderItem | None = None) -> SalesOrderItem:
+    if Decimal(str(payload_item.quantity)) <= 0:
+        raise HTTPException(status_code=400, detail="Quantidade deve ser maior que zero")
+    product = db.get(Product, payload_item.product_id)
+    if not product or not product.active:
+        raise HTTPException(status_code=400, detail="Produto inativo ou nao encontrado")
+    price_item = db.scalar(
+        select(PriceTableItem).where(
+            PriceTableItem.price_table_id == table.id,
+            PriceTableItem.product_id == product.id,
+            PriceTableItem.active == True,
+        )
+    )
+    if not price_item:
+        raise HTTPException(status_code=400, detail=f"Produto {product.sku} sem preco ativo na tabela")
+    quantity = Decimal(str(payload_item.quantity))
+    if item:
+        ensure_order_item_has_editable_balance(db, item, new_quantity=quantity)
+    price_before_progressive_discount = corrected_price(table, price_item.base_price, order.payment_due_date)
+    progressive_tier = applicable_progressive_tier(db, price_item, quantity)
+    unit_price = apply_progressive_discount(price_before_progressive_discount, progressive_tier)
+    negotiated_unit_price = money_round(Decimal(str(payload_item.negotiated_unit_price or unit_price)))
+    min_unit_price, max_unit_price = margin_bounds(unit_price, price_item.margin_percent)
+    cost_unit_price = money_round(Decimal(str(product.cost_price or 0)))
+    item_total = money_round(quantity * negotiated_unit_price)
+    item_total_cost = money_round(quantity * cost_unit_price)
+    item_profit = money_round(item_total - item_total_cost)
+    item = item or SalesOrderItem(order_id=order.id, cancelled_quantity=Decimal("0"), cancellation_status="active")
+    warehouse = resolve_warehouse(db, payload_item.warehouse_id or product.default_warehouse_id)
+    item.product_id = product.id
+    item.product_sku = product.sku
+    item.product_name = product.name
+    item.warehouse_id = warehouse["id"] if warehouse else None
+    item.warehouse_name = warehouse["name"] if warehouse else None
+    item.quantity = quantity
+    item.base_unit_price = price_item.base_price
+    item.corrected_unit_price = unit_price
+    item.negotiated_unit_price = negotiated_unit_price
+    item.price_margin_percent = price_item.margin_percent
+    item.min_unit_price = min_unit_price
+    item.max_unit_price = max_unit_price
+    item.cost_unit_price = cost_unit_price
+    item.total_amount = item_total
+    item.total_cost_amount = item_total_cost
+    item.gross_profit_amount = item_profit
+    item.profitability_percent = profitability_percent(item_total, item_profit)
+    item.commercial_status = commercial_status_for_price(negotiated_unit_price, min_unit_price, max_unit_price)
+    item.commercial_reason = commercial_reason_for_price(negotiated_unit_price, min_unit_price, max_unit_price)
+    recalculate_order_item(item)
+    if item.id is None:
+        db.add(item)
+    return item
+
+
 def build_order_items(db: Session, order: SalesOrder, table: PriceTable, payload_items, payment_due_date: date):
+    order.payment_due_date = payment_due_date
     for payload_item in payload_items:
-        if Decimal(str(payload_item.quantity)) <= 0:
-            raise HTTPException(status_code=400, detail="Quantidade deve ser maior que zero")
-        product = db.get(Product, payload_item.product_id)
-        if not product or not product.active:
-            raise HTTPException(status_code=400, detail="Produto inativo ou nao encontrado")
-        price_item = db.scalar(
-            select(PriceTableItem).where(
-                PriceTableItem.price_table_id == table.id,
-                PriceTableItem.product_id == product.id,
-                PriceTableItem.active == True,
-            )
-        )
-        if not price_item:
-            raise HTTPException(status_code=400, detail=f"Produto {product.sku} sem preco ativo na tabela")
-        quantity = Decimal(str(payload_item.quantity))
-        price_before_progressive_discount = corrected_price(table, price_item.base_price, payment_due_date)
-        progressive_tier = applicable_progressive_tier(db, price_item, quantity)
-        unit_price = apply_progressive_discount(price_before_progressive_discount, progressive_tier)
-        negotiated_unit_price = money_round(Decimal(str(payload_item.negotiated_unit_price or unit_price)))
-        min_unit_price, max_unit_price = margin_bounds(unit_price, price_item.margin_percent)
-        cost_unit_price = money_round(Decimal(str(product.cost_price or 0)))
-        item_total = money_round(quantity * negotiated_unit_price)
-        item_total_cost = money_round(quantity * cost_unit_price)
-        item_profit = money_round(item_total - item_total_cost)
-        item_profitability = profitability_percent(item_total, item_profit)
-        item_commercial_status = commercial_status_for_price(negotiated_unit_price, min_unit_price, max_unit_price)
-        warehouse = resolve_warehouse(db, payload_item.warehouse_id or product.default_warehouse_id)
-        db.add(
-            SalesOrderItem(
-                order_id=order.id,
-                product_id=product.id,
-                product_sku=product.sku,
-                product_name=product.name,
-                warehouse_id=warehouse["id"] if warehouse else None,
-                warehouse_name=warehouse["name"] if warehouse else None,
-                quantity=payload_item.quantity,
-                cancelled_quantity=Decimal("0"),
-                base_unit_price=price_item.base_price,
-                corrected_unit_price=unit_price,
-                negotiated_unit_price=negotiated_unit_price,
-                price_margin_percent=price_item.margin_percent,
-                min_unit_price=min_unit_price,
-                max_unit_price=max_unit_price,
-                cost_unit_price=cost_unit_price,
-                total_amount=item_total,
-                total_cost_amount=item_total_cost,
-                gross_profit_amount=item_profit,
-                profitability_percent=item_profitability,
-                commercial_status=item_commercial_status,
-                commercial_reason=commercial_reason_for_price(negotiated_unit_price, min_unit_price, max_unit_price),
-                cancellation_status="active",
-            )
-        )
+        apply_payload_to_order_item(db, order, table, payload_item)
 
 
 @app.get("/health", tags=["Sistema"])
@@ -979,7 +1183,8 @@ def delete_customer(customer_id: int, db: Session = Depends(get_db)):
 
 @app.get("/customer-profiles", response_model=list[CustomerProfileRead], tags=["Perfis comerciais"])
 def list_customer_profiles(db: Session = Depends(get_db)):
-    return db.scalars(select(CustomerProfile).order_by(CustomerProfile.code.asc(), CustomerProfile.name.asc())).all()
+    items = db.scalars(select(CustomerProfile).order_by(CustomerProfile.code.asc(), CustomerProfile.name.asc())).all()
+    return [customer_profile_to_read(db, item) for item in items]
 
 
 @app.post("/customer-profiles", response_model=CustomerProfileRead, status_code=status.HTTP_201_CREATED, tags=["Perfis comerciais"])
@@ -999,9 +1204,11 @@ def create_customer_profile(payload: CustomerProfileCreate, db: Session = Depend
         active=payload.active,
     )
     db.add(item)
+    db.flush()
+    replace_profile_payment_rules(db, item, payload.payment_rules)
     db.commit()
     db.refresh(item)
-    return item
+    return customer_profile_to_read(db, item)
 
 
 @app.put("/customer-profiles/{profile_id}", response_model=CustomerProfileRead, tags=["Perfis comerciais"])
@@ -1019,9 +1226,10 @@ def update_customer_profile(profile_id: int, payload: CustomerProfileUpdate, db:
     item.block_without_movement = payload.block_without_movement
     item.block_overdue_titles = payload.block_overdue_titles
     item.active = payload.active
+    replace_profile_payment_rules(db, item, payload.payment_rules)
     db.commit()
     db.refresh(item)
-    return item
+    return customer_profile_to_read(db, item)
 
 
 @app.delete("/customer-profiles/{profile_id}", tags=["Perfis comerciais"])
@@ -1306,6 +1514,121 @@ def delete_product(product_id: int, db: Session = Depends(get_db)):
     db.delete(item)
     db.commit()
     return {"ok": True}
+
+
+@app.put("/products/{product_id}/lot-config", response_model=ProductRead, tags=["Produtos"])
+def update_product_lot_config(product_id: int, payload: ProductLotConfigUpdate, db: Session = Depends(get_db)):
+    item = db.get(Product, product_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+    lot_type = payload.lot_type if payload.controls_lot else "none"
+    existing = db.execute(
+        text(
+            """
+            SELECT id
+            FROM flow_product_lot_configs
+            WHERE product_source = 'easysales' AND product_external_id = :product_id
+            """
+        ),
+        {"product_id": str(product_id)},
+    ).mappings().first()
+    if existing:
+        db.execute(
+            text(
+                """
+                UPDATE flow_product_lot_configs
+                SET controls_lot = :controls_lot, lot_type = :lot_type, updated_at = CURRENT_TIMESTAMP
+                WHERE id = :id
+                """
+            ),
+            {"id": existing["id"], "controls_lot": payload.controls_lot, "lot_type": lot_type},
+        )
+    else:
+        db.execute(
+            text(
+                """
+                INSERT INTO flow_product_lot_configs (product_source, product_external_id, controls_lot, lot_type, updated_at)
+                VALUES ('easysales', :product_id, :controls_lot, :lot_type, CURRENT_TIMESTAMP)
+                """
+            ),
+            {"product_id": str(product_id), "controls_lot": payload.controls_lot, "lot_type": lot_type},
+        )
+    db.commit()
+    db.refresh(item)
+    return product_to_read(db, item)
+
+
+@app.get("/stock-balances", response_model=list[StockBalanceRead], tags=["Produtos"])
+def list_stock_balances(product_external_id: str | None = None, db: Session = Depends(get_db)):
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    bl.warehouse_id,
+                    w.name AS warehouse_name,
+                    bl.balance_type_id,
+                    bl.balance_code,
+                    bl.balance_name,
+                    bl.product_source,
+                    bl.product_external_id,
+                    bl.product_sku,
+                    bl.product_name,
+                    COALESCE(SUM(bl.quantity), 0) AS balance_quantity
+                FROM flow_balance_ledger bl
+                JOIN flow_warehouses w ON w.id = bl.warehouse_id
+                WHERE (:product_external_id IS NULL OR bl.product_external_id = :product_external_id)
+                GROUP BY
+                    bl.warehouse_id, w.name, bl.balance_type_id, bl.balance_code, bl.balance_name,
+                    bl.product_source, bl.product_external_id, bl.product_sku, bl.product_name
+                ORDER BY w.name ASC, bl.balance_code ASC, bl.product_sku ASC
+                """
+            ),
+            {"product_external_id": product_external_id},
+        ).mappings().all()
+        return rows
+    except SQLAlchemyError:
+        db.rollback()
+        return []
+
+
+@app.get("/stock-movements", response_model=list[StockMovementRead], tags=["Produtos"])
+def list_stock_movements(product_external_id: str | None = None, db: Session = Depends(get_db)):
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    m.id,
+                    m.warehouse_id,
+                    w.name AS warehouse_name,
+                    m.operation_code,
+                    m.operation_name,
+                    m.document_type_code,
+                    m.document_number,
+                    m.document_series,
+                    m.issue_date,
+                    m.movement_date,
+                    m.product_source,
+                    m.product_external_id,
+                    m.product_sku,
+                    m.product_name,
+                    m.movement_type,
+                    m.quantity,
+                    m.unit_price,
+                    m.created_at
+                FROM flow_stock_movements m
+                JOIN flow_warehouses w ON w.id = m.warehouse_id
+                WHERE (:product_external_id IS NULL OR m.product_external_id = :product_external_id)
+                ORDER BY m.id DESC
+                """
+            ),
+            {"product_external_id": product_external_id},
+        ).mappings().all()
+        return rows
+    except SQLAlchemyError:
+        db.rollback()
+        return []
 
 
 @app.get("/price-tables", response_model=list[PriceTableRead], tags=["Tabelas de preco"])
@@ -1607,10 +1930,11 @@ def create_order_item(order_id: int, payload: SalesOrderItemCreate, db: Session 
     order = db.get(SalesOrder, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+    was_submitted = order.approval_stage != "draft"
     table = get_price_table_or_404(db, order.price_table_id)
     build_order_items(db, order, table, [payload], order.payment_due_date)
     recalculate_order_totals(db, order)
-    refresh_order_approval_stage(db, order)
+    revalidate_order_if_submitted(db, order, was_submitted)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -1624,12 +1948,11 @@ def update_order_item(order_id: int, item_id: int, payload: SalesOrderItemCreate
     item = db.get(SalesOrderItem, item_id)
     if not item or item.order_id != order.id:
         raise HTTPException(status_code=404, detail="Item do pedido nao encontrado")
-    db.delete(item)
-    db.flush()
+    was_submitted = order.approval_stage != "draft"
     table = get_price_table_or_404(db, order.price_table_id)
-    build_order_items(db, order, table, [payload], order.payment_due_date)
+    apply_payload_to_order_item(db, order, table, payload, item=item)
     recalculate_order_totals(db, order)
-    refresh_order_approval_stage(db, order)
+    revalidate_order_if_submitted(db, order, was_submitted)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -1643,10 +1966,12 @@ def delete_order_item(order_id: int, item_id: int, db: Session = Depends(get_db)
     item = db.get(SalesOrderItem, item_id)
     if not item or item.order_id != order.id:
         raise HTTPException(status_code=404, detail="Item do pedido nao encontrado")
+    was_submitted = order.approval_stage != "draft"
+    ensure_order_item_has_editable_balance(db, item, deleting=True)
     db.delete(item)
     db.flush()
     recalculate_order_totals(db, order)
-    refresh_order_approval_stage(db, order)
+    revalidate_order_if_submitted(db, order, was_submitted)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -1657,13 +1982,13 @@ def update_order(order_id: int, payload: SalesOrderUpdate, db: Session = Depends
     order = db.get(SalesOrder, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+    was_submitted = order.approval_stage != "draft"
     table = get_price_table_or_404(db, payload.price_table_id)
     if not table.active:
         raise HTTPException(status_code=400, detail="Tabela de preco inativa")
     customer = resolve_customer(db, payload.customer_id)
-    for item in db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all():
-        db.delete(item)
-    db.flush()
+    existing_items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id).order_by(SalesOrderItem.id.asc())).all()
+    has_linked_items = any(linked_quantity_for_order_item(db, item.id) > 0 for item in existing_items)
     order.customer_source = customer["source"]
     order.order_type = normalize_order_type(payload.order_type)
     order.customer_external_id = customer["external_id"]
@@ -1672,15 +1997,84 @@ def update_order(order_id: int, payload: SalesOrderUpdate, db: Session = Depends
     order.order_date = payload.order_date
     order.payment_due_date = payload.payment_due_date
     order.delivery_date = payload.delivery_date
-    order.status = "draft"
-    order.approval_stage = "draft"
-    order.approval_notes = None
-    order.financial_approved_at = None
-    order.commercial_approved_at = None
+    if not was_submitted:
+        order.status = "draft"
+        order.approval_stage = "draft"
+        order.approval_notes = None
+        order.financial_approved_at = None
+        order.commercial_approved_at = None
     order.notes = payload.notes
-    build_order_items(db, order, table, payload.items, payload.payment_due_date)
+    if has_linked_items:
+        if len(payload.items) < len(existing_items):
+            raise HTTPException(status_code=400, detail="Pedido com baixa vinculada no Flow nao permite remover itens pelo cabecalho")
+        for index, item in enumerate(existing_items):
+            payload_item = payload.items[index] if index < len(payload.items) else None
+            if not payload_item:
+                continue
+            if linked_quantity_for_order_item(db, item.id) > 0 and item.product_id != payload_item.product_id:
+                raise HTTPException(status_code=400, detail="Item com baixa vinculada no Flow nao permite troca de produto")
+            apply_payload_to_order_item(db, order, table, payload_item, item=item)
+        for payload_item in payload.items[len(existing_items):]:
+            apply_payload_to_order_item(db, order, table, payload_item)
+    else:
+        for item in existing_items:
+            db.delete(item)
+        db.flush()
+        build_order_items(db, order, table, payload.items, payload.payment_due_date)
     recalculate_order_totals(db, order)
-    refresh_order_approval_stage(db, order)
+    revalidate_order_if_submitted(db, order, was_submitted)
+    db.commit()
+    db.refresh(order)
+    return order_to_read(db, order)
+
+
+@app.post("/orders/{order_id}/payment-suggestions/generate", response_model=SalesOrderRead, tags=["Pedidos"])
+def generate_order_payment_suggestions(order_id: int, db: Session = Depends(get_db)):
+    order = db.get(SalesOrder, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+    was_submitted = order.approval_stage != "draft"
+    if Decimal(str(order.total_amount or 0)) <= 0:
+        raise HTTPException(status_code=400, detail="Pedido sem total para gerar sugestao de pagamento")
+    for item in db.scalars(select(SalesOrderPayment).where(SalesOrderPayment.order_id == order.id)).all():
+        db.delete(item)
+    db.add(
+        SalesOrderPayment(
+            order_id=order.id,
+            payment_method="avista",
+            due_date=order.payment_due_date,
+            amount=order.total_amount,
+            notes="Condicao comercial gerada pelo pedido.",
+        )
+    )
+    if was_submitted:
+        apply_order_approval_flow(db, order)
+    db.commit()
+    db.refresh(order)
+    return order_to_read(db, order)
+
+
+@app.put("/orders/{order_id}/payment-suggestions", response_model=SalesOrderRead, tags=["Pedidos"])
+def save_order_payment_suggestions(order_id: int, payload: list[SalesOrderPaymentCreate], db: Session = Depends(get_db)):
+    order = db.get(SalesOrder, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+    was_submitted = order.approval_stage != "draft"
+    validate_payment_suggestions(order, payload)
+    for item in db.scalars(select(SalesOrderPayment).where(SalesOrderPayment.order_id == order.id)).all():
+        db.delete(item)
+    for item in payload:
+        db.add(
+            SalesOrderPayment(
+                order_id=order.id,
+                payment_method=item.payment_method,
+                due_date=item.due_date,
+                amount=item.amount,
+                notes=item.notes,
+            )
+        )
+    if was_submitted:
+        apply_order_approval_flow(db, order)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -1694,9 +2088,10 @@ def submit_order(order_id: int, db: Session = Depends(get_db)):
     recalculate_order_totals(db, order)
     if Decimal(str(order.total_amount or 0)) <= 0:
         raise HTTPException(status_code=400, detail="Pedido sem itens ou total zerado")
-    order.status = "pending_financial"
-    order.approval_stage = "financial"
-    order.approval_notes = "Pedido enviado para autorizacao financeira: limite de credito, inadimplencia e regras do perfil comercial."
+    has_payment_suggestion = db.scalar(select(SalesOrderPayment).where(SalesOrderPayment.order_id == order.id))
+    if not has_payment_suggestion:
+        raise HTTPException(status_code=400, detail="Registre a condicao de pagamento antes de enviar para aprovacao.")
+    apply_order_approval_flow(db, order)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -1709,25 +2104,25 @@ def approve_order_financial(order_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Pedido nao encontrado")
     recalculate_order_totals(db, order)
     allowed, notes = evaluate_financial_approval(db, order)
-    order.approval_notes = " ".join(notes)
-    if not allowed:
-        order.status = "financial_blocked"
-        order.approval_stage = "financial"
+    order.financial_approved_at = datetime.utcnow()
+    if allowed:
+        order.approval_notes = " ".join(notes)
     else:
-        order.financial_approved_at = datetime.utcnow()
-        pending_commercial = db.scalar(
-            select(SalesOrderItem).where(
-                SalesOrderItem.order_id == order.id,
-                SalesOrderItem.commercial_status == "pending",
-            )
+        order.approval_notes = "Aprovacao financeira manual: " + " ".join(notes)
+    pending_commercial = db.scalar(
+        select(SalesOrderItem).where(
+            SalesOrderItem.order_id == order.id,
+            SalesOrderItem.commercial_status == "pending",
         )
-        if pending_commercial:
-            order.status = "pending_commercial"
-            order.approval_stage = "commercial"
-        else:
-            order.status = "approved"
-            order.approval_stage = "approved"
-            order.commercial_approved_at = datetime.utcnow()
+    )
+    if pending_commercial:
+        order.status = "pending_commercial"
+        order.approval_stage = "commercial"
+    else:
+        order.status = "approved"
+        order.approval_stage = "approved"
+        order.commercial_approved_at = datetime.utcnow()
+        if allowed:
             order.approval_notes = "Pedido aprovado automaticamente na etapa comercial."
     db.commit()
     db.refresh(order)
@@ -1786,10 +2181,14 @@ def cancel_order_item(order_id: int, item_id: int, payload: SalesOrderItemCancel
     remaining = effective_quantity(item)
     if cancel_qty > remaining:
         raise HTTPException(status_code=400, detail="Quantidade de cancelamento maior que o saldo do item")
+    linked_quantity = linked_quantity_for_order_item(db, item.id)
+    if linked_quantity > 0 and remaining - cancel_qty < linked_quantity:
+        raise HTTPException(status_code=400, detail="Cancelamento deixaria o item menor que a quantidade ja baixada no Flow")
+    was_submitted = order.approval_stage != "draft"
     item.cancelled_quantity = Decimal(str(item.cancelled_quantity or 0)) + cancel_qty
     recalculate_order_item(item)
     recalculate_order_totals(db, order)
-    refresh_order_approval_stage(db, order)
+    revalidate_order_if_submitted(db, order, was_submitted)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -1801,6 +2200,8 @@ def cancel_order(order_id: int, db: Session = Depends(get_db)):
     if not order:
         raise HTTPException(status_code=404, detail="Pedido nao encontrado")
     for item in db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all():
+        if linked_quantity_for_order_item(db, item.id) > 0:
+            raise HTTPException(status_code=400, detail="Pedido com baixa vinculada no Flow nao pode ser cancelado")
         item.cancelled_quantity = item.quantity
         recalculate_order_item(item)
     recalculate_order_totals(db, order)

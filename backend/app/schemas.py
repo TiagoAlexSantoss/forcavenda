@@ -77,9 +77,50 @@ class ProductRead(ProductBase):
     product_group_name: str | None = None
     product_class_name: str | None = None
     default_warehouse_name: str | None = None
+    controls_lot: bool = False
+    lot_type: str = "none"
 
     class Config:
         from_attributes = True
+
+
+class ProductLotConfigUpdate(BaseModel):
+    controls_lot: bool = False
+    lot_type: str = Field("none", pattern="^(seeds|general|none)$")
+
+
+class StockBalanceRead(BaseModel):
+    warehouse_id: int
+    warehouse_name: str | None = None
+    balance_type_id: int
+    balance_code: str
+    balance_name: str
+    product_source: str
+    product_external_id: str
+    product_sku: str
+    product_name: str
+    balance_quantity: Decimal
+
+
+class StockMovementRead(BaseModel):
+    id: int
+    warehouse_id: int
+    warehouse_name: str | None = None
+    operation_code: str | None = None
+    operation_name: str | None = None
+    document_type_code: str | None = None
+    document_number: str | None = None
+    document_series: str | None = None
+    issue_date: date | None = None
+    movement_date: date | None = None
+    product_source: str
+    product_external_id: str
+    product_sku: str
+    product_name: str
+    movement_type: str
+    quantity: Decimal
+    unit_price: Decimal = Decimal("0.00")
+    created_at: datetime
 
 
 class CustomerRead(BaseModel):
@@ -127,16 +168,31 @@ class CustomerProfileBase(BaseModel):
     active: bool = True
 
 
+class CustomerProfilePaymentRuleBase(BaseModel):
+    payment_method: str = "avista"
+    max_installments: int = 1
+    max_total_days: int = 0
+    active: bool = True
+
+
+class CustomerProfilePaymentRuleRead(CustomerProfilePaymentRuleBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
 class CustomerProfileCreate(CustomerProfileBase):
-    pass
+    payment_rules: list[CustomerProfilePaymentRuleBase] = Field(default_factory=list)
 
 
 class CustomerProfileUpdate(CustomerProfileBase):
-    pass
+    payment_rules: list[CustomerProfilePaymentRuleBase] = Field(default_factory=list)
 
 
 class CustomerProfileRead(CustomerProfileBase):
     id: int
+    payment_rules: list[CustomerProfilePaymentRuleRead] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -307,6 +363,24 @@ class SalesOrderItemRead(BaseModel):
         from_attributes = True
 
 
+class SalesOrderPaymentBase(BaseModel):
+    payment_method: str = "boleto"
+    due_date: date
+    amount: Decimal
+    notes: str | None = None
+
+
+class SalesOrderPaymentCreate(SalesOrderPaymentBase):
+    pass
+
+
+class SalesOrderPaymentRead(SalesOrderPaymentBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+
 class AuthorizationReasonRead(BaseModel):
     segment: str
     scope: str
@@ -340,6 +414,7 @@ class SalesOrderRead(BaseModel):
     profitability_percent: Decimal = Decimal("0.00")
     notes: str | None = None
     authorization_reasons: list[AuthorizationReasonRead] = Field(default_factory=list)
+    payment_suggestions: list[SalesOrderPaymentRead] = Field(default_factory=list)
     items: list[SalesOrderItemRead] = Field(default_factory=list)
 
     class Config:

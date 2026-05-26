@@ -87,6 +87,19 @@ class CustomerProfile(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class CustomerProfilePaymentRule(Base):
+    __tablename__ = "sf_customer_profile_payment_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    customer_profile_id: Mapped[int] = mapped_column(ForeignKey("sf_customer_profiles.id"), index=True, nullable=False)
+    payment_method: Mapped[str] = mapped_column(String(40), nullable=False, default="avista")
+    max_installments: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    max_total_days: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class PriceTable(Base):
     __tablename__ = "sf_price_tables"
 
@@ -183,3 +196,16 @@ class SalesOrderItem(Base):
     commercial_reason: Mapped[str | None] = mapped_column(String(800), nullable=True)
     cancellation_status: Mapped[str] = mapped_column(String(30), nullable=False, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+
+
+class SalesOrderPayment(Base):
+    __tablename__ = "sf_sales_order_payments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("sf_sales_orders.id"), index=True, nullable=False)
+    payment_method: Mapped[str] = mapped_column(String(40), nullable=False, default="boleto")
+    due_date: Mapped[date] = mapped_column(Date, nullable=False)
+    amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
+    notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)

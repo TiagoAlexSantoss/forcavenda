@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, Edit3, HelpCircle, Home, Layers3, Menu, Moon, Package, Plus, RefreshCcw, Send, Sun, Tags, Trash2, Users, X, XCircle } from "lucide-react";
+import { Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, CreditCard, Edit3, HelpCircle, Home, Layers3, Menu, Moon, Package, Plus, RefreshCcw, Send, Sun, Tags, Trash2, Users, X, XCircle } from "lucide-react";
 import api from "./services/api";
 import "./styles.css";
 
@@ -10,7 +10,8 @@ const decimal = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 2, maxim
 const percent = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
 const emptyCustomer = { customer_profile_id: "", name: "", document_number: "", email: "", phone: "", city: "", state_code: "", active: true };
-const emptyCustomerProfile = { code: "", name: "", description: "", max_inactive_days: "180", max_overdue_days: "0", block_without_movement: false, block_overdue_titles: true, active: true };
+const emptyCustomerProfile = { code: "", name: "", description: "", max_inactive_days: "180", max_overdue_days: "0", block_without_movement: false, block_overdue_titles: true, active: true, payment_rules: [] };
+const emptyProfilePaymentRule = { payment_method: "avista", max_installments: "1", max_total_days: "0", active: true };
 const emptyGroup = { code: "", name: "", description: "", active: true };
 const emptyClass = { product_group_id: "", code: "", name: "", description: "", active: true };
 const emptyProduct = { product_group_id: "", product_class_id: "", sku: "", name: "", unit: "UN", purchase_price: "0.00", cost_price: "0.00", sale_price: "0.00", default_warehouse_id: "", description: "", active: true };
@@ -19,6 +20,7 @@ const emptyPriceItem = { product_id: "", base_price: "0.00", margin_percent: "5.
 const emptyPriceTier = { min_quantity: "1.00", discount_percent: "0.00", active: true };
 const emptyOrder = { customer_id: "", price_table_id: "", order_type: "sale", order_date: today, payment_due_date: today, delivery_date: "", notes: "" };
 const emptyOrderItem = { product_id: "", warehouse_id: "", quantity: "1", negotiated_unit_price: "" };
+const emptyPaymentSuggestion = { payment_method: "avista", due_date: today, amount: "0.00", notes: "" };
 
 const MESSAGE_TYPES = {
   error: "error",
@@ -48,7 +50,7 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [menuOpen, setMenuOpen] = useState({ cadastros: true, operacoes: true });
   const [health, setHealth] = useState(null);
-  const [message, setMessage] = useState(null);
+  const [toasts, setToasts] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [customerProfiles, setCustomerProfiles] = useState([]);
   const [groups, setGroups] = useState([]);
@@ -57,6 +59,8 @@ function App() {
   const [priceTables, setPriceTables] = useState([]);
   const [orders, setOrders] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
+  const [balances, setBalances] = useState([]);
+  const [movements, setMovements] = useState([]);
   const [customerMonitoring, setCustomerMonitoring] = useState([]);
 
   useEffect(() => {
@@ -70,7 +74,7 @@ function App() {
 
   async function loadAll() {
     try {
-      const [healthRes, customersRes, monitoringRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes, warehousesRes] = await Promise.all([
+      const [healthRes, customersRes, monitoringRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes, warehousesRes, balancesRes, movementsRes] = await Promise.all([
         api.get("/health"),
         api.get("/customers"),
         api.get("/customer-monitoring"),
@@ -81,6 +85,8 @@ function App() {
         api.get("/price-tables"),
         api.get("/orders"),
         api.get("/warehouses"),
+        api.get("/stock-balances"),
+        api.get("/stock-movements"),
       ]);
       setHealth(healthRes.data);
       setCustomers(customersRes.data);
@@ -92,15 +98,15 @@ function App() {
       setPriceTables(priceTablesRes.data);
       setOrders(ordersRes.data);
       setWarehouses(warehousesRes.data);
-      setMessage(null);
+      setBalances(balancesRes.data);
+      setMovements(movementsRes.data);
     } catch (error) {
-      setMessage(errorMessage(error, MESSAGES.apiUnavailable));
+      pushToast(errorMessage(error, MESSAGES.apiUnavailable));
     }
   }
 
   function openTab(tab) {
     setActiveTab(tab);
-    setMessage(null);
   }
 
   const pageMeta = {
@@ -118,14 +124,23 @@ function App() {
 
   async function run(action) {
     try {
-      await action();
+      const result = await action();
       await loadAll();
-      setMessage(createMessage(MESSAGE_TYPES.success, MESSAGES.operationSuccess));
-      return true;
+      pushToast(createMessage(MESSAGE_TYPES.success, MESSAGES.operationSuccess));
+      return result || true;
     } catch (error) {
-      setMessage(errorMessage(error));
+      pushToast(errorMessage(error));
       return false;
     }
+  }
+
+  function pushToast(message) {
+    const id = `${Date.now()}-${Math.random()}`;
+    const toast = { ...message, id };
+    setToasts((current) => [toast, ...current].slice(0, 5));
+    window.setTimeout(() => {
+      setToasts((current) => current.filter((item) => item.id !== id));
+    }, 4200);
   }
 
   return (
@@ -172,10 +187,14 @@ function App() {
           </div>
         </header>
 
-        {message && <div className={`message ${message.type}`}>{message.text}</div>}
+        {toasts.length > 0 && (
+          <div className="toast-stack">
+            {toasts.map((toast) => <div key={toast.id} className={`message ${toast.type}`}>{toast.text}</div>)}
+          </div>
+        )}
 
         {activeTab === "home" && <HomePage orders={orders} customers={customers} products={products} priceTables={priceTables} customerMonitoring={customerMonitoring} openTab={openTab} />}
-        {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} warehouses={warehouses} run={run} />}
+        {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} run={run} />}
         {activeTab === "priceTables" && <PriceTablesBrowser priceTables={priceTables} products={products} run={run} />}
         {activeTab === "groups" && <SimpleCatalogBrowser title="Grupos de produtos" eyebrow="Cadastros" endpoint="/product-groups" items={groups} template={emptyGroup} run={run} />}
         {activeTab === "classes" && <ClassesBrowser classes={classes} groups={groups} run={run} />}
@@ -286,7 +305,11 @@ function HomeCard({ label, value, tone, onClick }) {
   );
 }
 
-function ProductsBrowser({ products, groups, classes, warehouses, run }) {
+function lotTypeLabel(value) {
+  return ({ seeds: "Sementes", general: "Geral", none: "Nao controla" }[value] || value || "Nao controla");
+}
+
+function ProductsBrowser({ products, groups, classes, warehouses, balances, movements, run }) {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
   const rows = useMemo(() => filterRows(products, query, ["sku", "name", "product_group_name", "product_class_name"]), [products, query]);
@@ -315,40 +338,101 @@ function ProductsBrowser({ products, groups, classes, warehouses, run }) {
 
   return (
     <Browser title="Produtos" eyebrow="Cadastros" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: toForm(null) })}>
-      <DataTable columns={["SKU", "Produto", "Grupo", "Local padrao", "Compra", "Custo", "Venda ref.", "Status", "Acoes"]} rows={rows.map((item) => [
+      <DataTable columns={["SKU", "Produto", "Grupo", "Local padrao", "Lote", "Compra", "Custo", "Venda ref.", "Status", "Acoes"]} rows={rows.map((item) => [
         item.sku,
         item.name,
         item.product_group_name || "-",
         item.default_warehouse_name || "-",
+        item.controls_lot ? lotTypeLabel(item.lot_type) : "Nao controla",
         money.format(Number(item.purchase_price || 0)),
         money.format(Number(item.cost_price || 0)),
         money.format(Number(item.sale_price || 0)),
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/products/${item.id}`))} />,
       ])} />
-      {modal && <ProductModal state={modal} setState={setModal} groups={groups} classes={classes} warehouses={warehouses} onSave={save} />}
+      {modal && <ProductModal state={modal} setState={setModal} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} run={run} onSave={save} />}
     </Browser>
   );
 }
 
-function ProductModal({ state, setState, groups, classes, warehouses, onSave }) {
+function ProductModal({ state, setState, groups, classes, warehouses, balances, movements, run, onSave }) {
   const { item, form } = state;
+  const [activeTab, setActiveTab] = useState("data");
+  const [lotConfig, setLotConfig] = useState({ controls_lot: item?.controls_lot || false, lot_type: item?.lot_type || "none" });
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
+  const productBalances = item ? balances.filter((row) => String(row.product_external_id) === String(item.id)) : [];
+  const productMovements = item ? movements.filter((row) => String(row.product_external_id) === String(item.id)) : [];
+
+  async function saveLotConfig() {
+    if (!item?.id) return;
+    const response = await run(() => api.put(`/products/${item.id}/lot-config`, lotConfig));
+    if (response) setState({ ...state, item: response.data });
+  }
+
   return (
     <Modal title={item ? "Editar produto" : "Novo produto"} onClose={() => setState(null)} onSubmit={() => onSave(form, item)}>
-      <div className="modal-grid">
-        <Field label="SKU"><input required value={form.sku} onChange={(e) => update("sku", e.target.value.toUpperCase())} /></Field>
-        <Field label="Produto"><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
-        <Field label="Grupo"><Select value={form.product_group_id} onChange={(v) => update("product_group_id", v)} options={groups} empty="Sem grupo" /></Field>
-        <Field label="Classe"><Select value={form.product_class_id} onChange={(v) => update("product_class_id", v)} options={classes} empty="Sem classe" /></Field>
-        <Field label="Local padrao"><Select value={form.default_warehouse_id} onChange={(v) => update("default_warehouse_id", v)} options={warehouses} empty="Sem local padrao" /></Field>
-        <Field label="Unidade"><input value={form.unit} onChange={(e) => update("unit", e.target.value.toUpperCase())} /></Field>
-        <Field label="Preco compra"><input type="number" min="0" step="0.01" value={form.purchase_price} onChange={(e) => update("purchase_price", e.target.value)} /></Field>
-        <Field label="Custo"><input type="number" min="0" step="0.01" value={form.cost_price} onChange={(e) => update("cost_price", e.target.value)} /></Field>
-        <Field label="Preco referencia"><input type="number" min="0" step="0.01" value={form.sale_price} onChange={(e) => update("sale_price", e.target.value)} /></Field>
-        <Field label="Descricao" wide><input value={form.description} onChange={(e) => update("description", e.target.value)} /></Field>
-        <Check label="Ativo" checked={form.active} onChange={(v) => update("active", v)} />
+      <div className="tabs">
+        <button type="button" className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>Dados</button>
+        <button type="button" className={activeTab === "stock" ? "active" : ""} onClick={() => setActiveTab("stock")} disabled={!item}>Saldo</button>
       </div>
+
+      {activeTab === "data" && (
+        <div className="modal-grid">
+          <Field label="SKU"><input required value={form.sku} onChange={(e) => update("sku", e.target.value.toUpperCase())} /></Field>
+          <Field label="Produto"><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
+          <Field label="Grupo"><Select value={form.product_group_id} onChange={(v) => update("product_group_id", v)} options={groups} empty="Sem grupo" /></Field>
+          <Field label="Classe"><Select value={form.product_class_id} onChange={(v) => update("product_class_id", v)} options={classes} empty="Sem classe" /></Field>
+          <Field label="Local padrao"><Select value={form.default_warehouse_id} onChange={(v) => update("default_warehouse_id", v)} options={warehouses} empty="Sem local padrao" /></Field>
+          <Field label="Unidade"><input value={form.unit} onChange={(e) => update("unit", e.target.value.toUpperCase())} /></Field>
+          <Field label="Preco compra"><input type="number" min="0" step="0.01" value={form.purchase_price} onChange={(e) => update("purchase_price", e.target.value)} /></Field>
+          <Field label="Custo"><input type="number" min="0" step="0.01" value={form.cost_price} onChange={(e) => update("cost_price", e.target.value)} /></Field>
+          <Field label="Preco referencia"><input type="number" min="0" step="0.01" value={form.sale_price} onChange={(e) => update("sale_price", e.target.value)} /></Field>
+          <Field label="Descricao" wide><input value={form.description} onChange={(e) => update("description", e.target.value)} /></Field>
+          <Check label="Ativo" checked={form.active} onChange={(v) => update("active", v)} />
+          {item && (
+            <div className="lot-config-row span-2">
+              <Check label="Controla lote" checked={lotConfig.controls_lot} onChange={(value) => setLotConfig({ ...lotConfig, controls_lot: value, lot_type: value ? (lotConfig.lot_type === "none" ? "general" : lotConfig.lot_type) : "none" })} />
+              <Field label="Tipo de lote">
+                <select value={lotConfig.lot_type} disabled={!lotConfig.controls_lot} onChange={(event) => setLotConfig({ ...lotConfig, lot_type: event.target.value })}>
+                  <option value="none">Nao controla</option>
+                  <option value="seeds">Sementes</option>
+                  <option value="general">Geral</option>
+                </select>
+              </Field>
+              <button type="button" className="secondary-button" onClick={saveLotConfig}>Salvar lote</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {activeTab === "stock" && item && (
+        <div className="detail-stack">
+          <section className="subpanel">
+            <div className="panel-header">
+              <div>
+                <p>Guia de saldo</p>
+                <h2>Saldos por local</h2>
+              </div>
+            </div>
+            <DataTable columns={["Local", "Saldo", "Quantidade"]} rows={productBalances.map((row) => [
+              row.warehouse_name || "-",
+              `${row.balance_code} - ${row.balance_name}`,
+              decimal.format(Number(row.balance_quantity || 0)),
+            ])} />
+          </section>
+          <details className="subpanel" open>
+            <summary>Movimentacoes do produto</summary>
+            <DataTable columns={["Data mov.", "Documento", "Operacao", "Local", "Quantidade", "Valor unit."]} rows={productMovements.slice(0, 80).map((row) => [
+              row.movement_date || new Date(row.created_at).toLocaleDateString("pt-BR"),
+              row.document_type_code ? `${row.document_type_code}${row.document_number ? ` ${row.document_number}` : ""}` : "-",
+              row.operation_code ? `${row.operation_code} - ${row.operation_name}` : "-",
+              row.warehouse_name || "-",
+              decimal.format(Number(row.quantity || 0)),
+              money.format(Number(row.unit_price || 0)),
+            ])} />
+          </details>
+        </div>
+      )}
     </Modal>
   );
 }
@@ -653,6 +737,12 @@ function CustomerProfilesBrowser({ profiles, run }) {
       block_without_movement: item.block_without_movement,
       block_overdue_titles: item.block_overdue_titles,
       active: item.active,
+      payment_rules: (item.payment_rules || []).map((rule) => ({
+        payment_method: rule.payment_method || "avista",
+        max_installments: String(rule.max_installments || 1),
+        max_total_days: String(rule.max_total_days || 0),
+        active: rule.active,
+      })),
     } : emptyCustomerProfile;
   }
 
@@ -666,6 +756,12 @@ function CustomerProfilesBrowser({ profiles, run }) {
       block_without_movement: form.block_without_movement,
       block_overdue_titles: form.block_overdue_titles,
       active: form.active,
+      payment_rules: (form.payment_rules || []).map((rule) => ({
+        payment_method: rule.payment_method,
+        max_installments: Number(rule.max_installments || 1),
+        max_total_days: Number(rule.max_total_days || 0),
+        active: rule.active,
+      })),
     };
     await run(() => item ? api.put(`/customer-profiles/${item.id}`, payload) : api.post("/customer-profiles", payload));
     setModal(null);
@@ -673,11 +769,12 @@ function CustomerProfilesBrowser({ profiles, run }) {
 
   return (
     <Browser title="Perfis comerciais" eyebrow="Cadastros" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: toForm(null) })}>
-      <DataTable columns={["Codigo", "Nome", "Dias sem mov.", "Titulos vencidos", "Bloqueios", "Status", "Acoes"]} rows={rows.map((item) => [
+      <DataTable columns={["Codigo", "Nome", "Dias sem mov.", "Titulos vencidos", "Cond. pgto.", "Bloqueios", "Status", "Acoes"]} rows={rows.map((item) => [
         item.code,
         item.name,
         item.max_inactive_days,
         item.max_overdue_days,
+        (item.payment_rules || []).filter((rule) => rule.active).length || "Nenhuma",
         [item.block_without_movement && "Sem mov.", item.block_overdue_titles && "Vencidos"].filter(Boolean).join(" / ") || "-",
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/customer-profiles/${item.id}`))} />,
@@ -690,6 +787,10 @@ function CustomerProfilesBrowser({ profiles, run }) {
 function CustomerProfileModal({ state, setState, onSave }) {
   const { item, form } = state;
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
+  const paymentRules = form.payment_rules || [];
+  const updateRule = (index, field, value) => update("payment_rules", paymentRules.map((rule, rowIndex) => rowIndex === index ? { ...rule, [field]: value } : rule));
+  const addRule = () => update("payment_rules", [...paymentRules, emptyProfilePaymentRule]);
+  const removeRule = (index) => update("payment_rules", paymentRules.filter((_, rowIndex) => rowIndex !== index));
   return (
     <Modal title={item ? "Editar perfil comercial" : "Novo perfil comercial"} onClose={() => setState(null)} onSubmit={() => onSave(form, item)}>
       <div className="modal-grid">
@@ -702,6 +803,27 @@ function CustomerProfileModal({ state, setState, onSave }) {
         <Check label="Bloquear por titulos vencidos" checked={form.block_overdue_titles} onChange={(v) => update("block_overdue_titles", v)} />
         <Check label="Ativo" checked={form.active} onChange={(v) => update("active", v)} />
       </div>
+      <section className="nested-detail">
+        <div className="panel-header compact">
+          <div>
+            <p>Aprovacao financeira</p>
+            <h3>Condicoes de pagamento liberadas</h3>
+          </div>
+          <button type="button" className="secondary-button" onClick={addRule}>Adicionar regra</button>
+        </div>
+        <div className="source-hint">Sem regras ativas, toda condicao de pagamento cai para autorizacao financeira.</div>
+        <DataTable columns={["Condicao", "Parcelas max.", "Dias max.", "Ativa", "Acoes"]} rows={paymentRules.map((rule, index) => [
+          <select value={rule.payment_method} onChange={(event) => updateRule(index, "payment_method", event.target.value)}>
+            <option value="avista">A vista</option>
+            <option value="parcelado">Parcelado</option>
+            <option value="adiantamento">Adiantamento</option>
+          </select>,
+          <input type="number" min="1" step="1" value={rule.max_installments} onChange={(event) => updateRule(index, "max_installments", event.target.value)} />,
+          <input type="number" min="0" step="1" value={rule.max_total_days} onChange={(event) => updateRule(index, "max_total_days", event.target.value)} />,
+          <Check label="Ativa" checked={rule.active} onChange={(value) => updateRule(index, "active", value)} />,
+          <button type="button" className="secondary-button compact-button" onClick={() => removeRule(index)}>Remover</button>,
+        ])} />
+      </section>
     </Modal>
   );
 }
@@ -865,7 +987,9 @@ function OrdersBrowser({ orders, customers, products, priceTables, warehouses, r
 
   async function save(form, item) {
     const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_type: form.order_type || "sale", order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: item ? item.items.map((row) => ({ product_id: row.product_id, warehouse_id: row.warehouse_id || null, quantity: row.quantity, negotiated_unit_price: row.negotiated_unit_price })) : [] };
-    await run(() => item ? api.put(`/orders/${item.id}`, payload) : api.post("/orders", payload));
+    const response = await run(() => item ? api.put(`/orders/${item.id}`, payload) : api.post("/orders", payload));
+    if (!response) return;
+    if (!response.data.payment_suggestions?.length) window.alert("Pedido salvo. Falta gerar a sugestao de pagamento.");
     setModal(null);
   }
 
@@ -1061,16 +1185,44 @@ function priceCorrectionHelp(preview, priceTable) {
   };
 }
 
+function toPaymentRows(rows) {
+  const normalizeCondition = (value) => ["avista", "parcelado", "adiantamento"].includes(value) ? value : "avista";
+  return rows.map((row) => ({
+    payment_method: normalizeCondition(row.payment_method),
+    due_date: row.due_date || today,
+    amount: String(row.amount || "0.00"),
+    notes: row.notes || "",
+  }));
+}
+
+function addDays(dateValue, days) {
+  const date = new Date(`${dateValue || today}T00:00:00`);
+  date.setDate(date.getDate() + Number(days || 0));
+  return date.toISOString().slice(0, 10);
+}
+
 function OrderModal({ state, setState, customers, products, priceTables, warehouses, run, onSave }) {
   const { item, form } = state;
   const [currentOrder, setCurrentOrder] = useState(item);
   const [itemForm, setItemForm] = useState(emptyOrderItem);
   const [editingItem, setEditingItem] = useState(null);
   const [preview, setPreview] = useState(null);
+  const [paymentModalOpen, setPaymentModalOpen] = useState(false);
+  const [paymentRows, setPaymentRows] = useState(() => toPaymentRows(item?.payment_suggestions || []));
+  const [paymentPlan, setPaymentPlan] = useState({ condition: "avista", installments: "1", first_due_date: form.payment_due_date || today, interval_days: "30" });
+  const [paymentNotice, setPaymentNotice] = useState("");
   const selectedPriceTable = priceTables.find((table) => Number(table.id) === Number(form.price_table_id));
   const correctionHelp = priceCorrectionHelp(preview, selectedPriceTable);
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
   const productDefaultWarehouse = (productId) => products.find((product) => String(product.id) === String(productId))?.default_warehouse_id || "";
+  const paymentTotal = paymentRows.reduce((total, row) => total + Number(row.amount || 0), 0);
+  const orderTotal = Number(currentOrder?.total_amount || 0);
+  const paymentTotalOver = paymentTotal > orderTotal + 0.009;
+  const paymentTotalMatches = Math.abs(paymentTotal - orderTotal) < 0.01;
+
+  useEffect(() => {
+    setPaymentRows(toPaymentRows(currentOrder?.payment_suggestions || []));
+  }, [currentOrder?.id, currentOrder?.payment_suggestions?.length]);
 
   useEffect(() => {
     if (!form.price_table_id || !itemForm.product_id || !form.payment_due_date) {
@@ -1091,6 +1243,8 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
       ? await api.put(`/orders/${currentOrder.id}`, payload)
       : await api.post("/orders", { ...payload, items: [] });
     setCurrentOrder(response.data);
+    if (!response.data.payment_suggestions?.length) setPaymentNotice("Falta gerar a sugestao de pagamento do pedido.");
+    else setPaymentNotice("");
     await run(async () => response);
   }
 
@@ -1101,6 +1255,10 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
 
   async function submitOrder() {
     if (!currentOrder?.id) return;
+    if (!currentOrder.payment_suggestions?.length) {
+      setPaymentNotice("Registre a condicao de pagamento antes de enviar para aprovacao.");
+      return;
+    }
     const response = await api.post(`/orders/${currentOrder.id}/submit`);
     setCurrentOrder(response.data);
     await run(async () => response);
@@ -1139,6 +1297,76 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
     await run(async () => response);
   }
 
+  async function generatePayments() {
+    if (!currentOrder?.id) return;
+    const total = Number(currentOrder.total_amount || 0);
+    const installments = paymentPlan.condition === "parcelado" ? Math.max(1, Number(paymentPlan.installments || 1)) : 1;
+    const baseAmount = Math.floor((total / installments) * 100) / 100;
+    const rows = Array.from({ length: installments }, (_, index) => {
+      const amount = index === installments - 1 ? (total - baseAmount * (installments - 1)) : baseAmount;
+      const dueDate = paymentPlan.condition === "adiantamento"
+        ? (paymentPlan.first_due_date || form.order_date || today)
+        : addDays(paymentPlan.first_due_date || form.payment_due_date || today, index * Number(paymentPlan.interval_days || 30));
+      return {
+        payment_method: paymentPlan.condition,
+        due_date: dueDate,
+        amount: amount.toFixed(2),
+        notes: paymentPlan.condition === "parcelado" ? `Parcela ${index + 1}/${installments}` : "",
+      };
+    });
+    setPaymentRows(rows);
+    setPaymentNotice("");
+  }
+
+  async function savePayments() {
+    if (!currentOrder?.id) return;
+    if (!paymentRows.length) {
+      setPaymentNotice("Informe ao menos uma parcela ou gere uma sugestao.");
+      return;
+    }
+    if (paymentTotalOver) {
+      setPaymentNotice("O total sugerido nao pode passar o valor do pedido.");
+      return;
+    }
+    if (!paymentTotalMatches) {
+      setPaymentNotice("O total sugerido precisa fechar com o total do pedido.");
+      return;
+    }
+    const payload = paymentRows.map((row) => ({
+      payment_method: row.payment_method,
+      due_date: row.due_date,
+      amount: Number(row.amount || 0),
+      notes: row.notes.trim() || null,
+    }));
+    try {
+      const response = await api.put(`/orders/${currentOrder.id}/payment-suggestions`, payload);
+      setCurrentOrder(response.data);
+      setPaymentRows(toPaymentRows(response.data.payment_suggestions || []));
+      setPaymentNotice("");
+      await run(async () => response);
+    } catch (error) {
+      setPaymentNotice(error?.response?.data?.detail || "Nao foi possivel salvar a sugestao de pagamento.");
+    }
+  }
+
+  function updatePaymentRow(index, field, value) {
+    setPaymentRows((current) => current.map((row, rowIndex) => rowIndex === index ? { ...row, [field]: value } : row));
+    setPaymentNotice("");
+  }
+
+  function addPaymentRow() {
+    if (paymentTotal >= orderTotal - 0.009) {
+      setPaymentNotice("O total sugerido ja atingiu o valor do pedido. Reduza uma parcela antes de adicionar outra.");
+      return;
+    }
+    setPaymentRows((current) => [...current, { ...emptyPaymentSuggestion, due_date: form.payment_due_date, amount: "0.00" }]);
+    setPaymentNotice("");
+  }
+
+  function removePaymentRow(index) {
+    setPaymentRows((current) => current.filter((_, rowIndex) => rowIndex !== index));
+  }
+
   function editOrderItem(row) {
     setEditingItem(row);
     setItemForm({ product_id: row.product_id || "", warehouse_id: row.warehouse_id || productDefaultWarehouse(row.product_id), quantity: String(row.quantity || "1"), negotiated_unit_price: String(row.negotiated_unit_price || row.corrected_unit_price || "") });
@@ -1156,9 +1384,12 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
         <Field label="Observacao" wide><input value={form.notes} onChange={(e) => update("notes", e.target.value)} /></Field>
         {currentOrder?.approval_notes && <Field label="Autorizacao" wide><input disabled value={currentOrder.approval_notes} /></Field>}
         <div className="form-actions"><button type="button" className="secondary-button" onClick={saveHeader}>{currentOrder ? "Salvar cabecalho" : "Salvar cabecalho para itens"}</button></div>
+        {currentOrder?.id && <div className="form-actions"><button type="button" className="secondary-button" onClick={() => setPaymentModalOpen(true)}><CreditCard size={16} /> Pagamento</button></div>}
         {currentOrder?.status === "draft" && <div className="form-actions"><button type="button" className="primary-button" onClick={submitOrder}><Send size={16} /> Enviar para aprovacao</button></div>}
         {currentOrder?.id && !["cancelled", "rejected"].includes(currentOrder.status) && <div className="form-actions"><button type="button" className="secondary-button" onClick={cancelOrder}>Cancelar pedido</button></div>}
       </div>
+
+      {paymentNotice && <div className="inline-alert">{paymentNotice}</div>}
 
       <section className="modal-detail">
         {currentOrder?.id && (
@@ -1166,6 +1397,7 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
             <span>Tipo <strong>{orderTypeLabel(currentOrder.order_type)}</strong></span>
             <span>Status <OrderStatus status={currentOrder.status} overdue={isOrderDeliveryOverdue(currentOrder)} /></span>
             <span>Pagamento <strong>{currentOrder.payment_due_date}</strong></span>
+            <span>Cond. pgto. <strong>{currentOrder.payment_suggestions?.length ? `${currentOrder.payment_suggestions.length} sugestao(oes)` : "Pendente"}</strong></span>
             <span>Entrega <strong>{currentOrder.delivery_date || "Nao informada"}</strong></span>
             <span>Cliente <strong>{currentOrder.customer_name}</strong></span>
           </div>
@@ -1235,6 +1467,56 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
           </div>
         </div>
       </section>
+      {paymentModalOpen && (
+        <div className="nested-modal-backdrop">
+          <div className="nested-modal">
+            <header>
+              <h3>Sugestao de pagamento</h3>
+              <button type="button" className="icon-button" onClick={() => setPaymentModalOpen(false)}><X size={18} /></button>
+            </header>
+            <div className="payment-actions">
+              <Field label="Condicao">
+                <select value={paymentPlan.condition} onChange={(event) => setPaymentPlan({ ...paymentPlan, condition: event.target.value, installments: event.target.value === "parcelado" ? paymentPlan.installments : "1" })}>
+                  <option value="avista">A vista</option>
+                  <option value="parcelado">Parcelado</option>
+                  <option value="adiantamento">Adiantamento</option>
+                </select>
+              </Field>
+              <Field label="Parcelas">
+                <input type="number" min="1" step="1" disabled={paymentPlan.condition !== "parcelado"} value={paymentPlan.installments} onChange={(event) => setPaymentPlan({ ...paymentPlan, installments: event.target.value })} />
+              </Field>
+              <Field label="Primeiro venc.">
+                <input type="date" value={paymentPlan.first_due_date} onChange={(event) => setPaymentPlan({ ...paymentPlan, first_due_date: event.target.value })} />
+              </Field>
+              <Field label="Intervalo dias">
+                <input type="number" min="1" step="1" disabled={paymentPlan.condition !== "parcelado"} value={paymentPlan.interval_days} onChange={(event) => setPaymentPlan({ ...paymentPlan, interval_days: event.target.value })} />
+              </Field>
+              <button type="button" className="secondary-button" onClick={generatePayments}>Gerar sugestao</button>
+              <button type="button" className="secondary-button" onClick={addPaymentRow} disabled={paymentTotal >= orderTotal - 0.009}>Adicionar parcela</button>
+            </div>
+            {paymentNotice && <div className={`inline-alert ${paymentTotalOver ? "danger" : ""}`}>{paymentNotice}</div>}
+            <DataTable columns={["Condicao", "Vencimento", "Valor", "Observacao", "Acoes"]} rows={paymentRows.map((row, index) => [
+              <select value={row.payment_method} onChange={(event) => updatePaymentRow(index, "payment_method", event.target.value)}>
+                <option value="avista">A vista</option>
+                <option value="parcelado">Parcelado</option>
+                <option value="adiantamento">Adiantamento</option>
+              </select>,
+              <input type="date" value={row.due_date} onChange={(event) => updatePaymentRow(index, "due_date", event.target.value)} />,
+              <input type="number" min="0.01" step="0.01" value={row.amount} onChange={(event) => updatePaymentRow(index, "amount", event.target.value)} />,
+              <input value={row.notes} onChange={(event) => updatePaymentRow(index, "notes", event.target.value)} />,
+              <button type="button" className="secondary-button compact-button" onClick={() => removePaymentRow(index)}>Remover</button>,
+            ])} />
+            <div className={`payment-total ${paymentTotalOver ? "over" : ""}`}>
+              <span>Total sugerido: <strong>{money.format(paymentTotal)}</strong></span>
+              <span>Total pedido: <strong>{money.format(orderTotal)}</strong></span>
+            </div>
+            <footer>
+              <button type="button" className="secondary-button" onClick={() => setPaymentModalOpen(false)}>Fechar</button>
+              <button type="button" className="primary-button" onClick={savePayments}>Salvar sugestao</button>
+            </footer>
+          </div>
+        </div>
+      )}
     </Modal>
   );
 }
