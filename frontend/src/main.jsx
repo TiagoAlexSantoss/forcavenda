@@ -50,6 +50,8 @@ function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [menuOpen, setMenuOpen] = useState({ cadastros: true, operacoes: true });
   const [health, setHealth] = useState(null);
+  const [companies, setCompanies] = useState([]);
+  const [activeCompanyId, setActiveCompanyId] = useState(() => localStorage.getItem("easy-active-company-id") || "");
   const [toasts, setToasts] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [customerProfiles, setCustomerProfiles] = useState([]);
@@ -74,8 +76,9 @@ function App() {
 
   async function loadAll() {
     try {
-      const [healthRes, customersRes, monitoringRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes, warehousesRes, balancesRes, movementsRes] = await Promise.all([
+      const [healthRes, companiesRes, customersRes, monitoringRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes, warehousesRes, balancesRes, movementsRes] = await Promise.all([
         api.get("/health"),
+        api.get("/companies"),
         api.get("/customers"),
         api.get("/customer-monitoring"),
         api.get("/customer-profiles"),
@@ -89,6 +92,11 @@ function App() {
         api.get("/stock-movements"),
       ]);
       setHealth(healthRes.data);
+      setCompanies(companiesRes.data);
+      if (!localStorage.getItem("easy-active-company-id") && companiesRes.data[0]?.id) {
+        localStorage.setItem("easy-active-company-id", String(companiesRes.data[0].id));
+        setActiveCompanyId(String(companiesRes.data[0].id));
+      }
       setCustomers(customersRes.data);
       setCustomerMonitoring(monitoringRes.data);
       setCustomerProfiles(profilesRes.data);
@@ -107,6 +115,12 @@ function App() {
 
   function openTab(tab) {
     setActiveTab(tab);
+  }
+
+  function changeCompany(companyId) {
+    localStorage.setItem("easy-active-company-id", companyId);
+    setActiveCompanyId(companyId);
+    window.setTimeout(loadAll, 0);
   }
 
   const pageMeta = {
@@ -180,6 +194,9 @@ function App() {
             <h1>{pageMeta[1]}</h1>
           </div>
           <div className="topbar-actions">
+            <select className="company-select" value={activeCompanyId} onChange={(event) => changeCompany(event.target.value)}>
+              {companies.map((company) => <option key={company.id} value={company.id}>{company.code} - {company.name}</option>)}
+            </select>
             <button className="secondary-button" onClick={() => setTheme((value) => value === "dark" ? "light" : "dark")}>
               {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />} {theme === "dark" ? "Claro" : "Escuro"}
             </button>
@@ -194,11 +211,11 @@ function App() {
         )}
 
         {activeTab === "home" && <HomePage orders={orders} customers={customers} products={products} priceTables={priceTables} customerMonitoring={customerMonitoring} openTab={openTab} />}
-        {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} run={run} />}
-        {activeTab === "priceTables" && <PriceTablesBrowser priceTables={priceTables} products={products} run={run} />}
-        {activeTab === "groups" && <SimpleCatalogBrowser title="Grupos de produtos" eyebrow="Cadastros" endpoint="/product-groups" items={groups} template={emptyGroup} run={run} />}
-        {activeTab === "classes" && <ClassesBrowser classes={classes} groups={groups} run={run} />}
-        {activeTab === "customers" && <CustomersBrowser customers={customers} customerProfiles={customerProfiles} run={run} />}
+        {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} companies={companies} run={run} />}
+        {activeTab === "priceTables" && <PriceTablesBrowser priceTables={priceTables} products={products} companies={companies} run={run} />}
+        {activeTab === "groups" && <SimpleCatalogBrowser title="Grupos de produtos" eyebrow="Cadastros" endpoint="/product-groups" items={groups} template={emptyGroup} companies={companies} companyEndpoint="/product-groups" run={run} />}
+        {activeTab === "classes" && <ClassesBrowser classes={classes} groups={groups} companies={companies} run={run} />}
+        {activeTab === "customers" && <CustomersBrowser customers={customers} customerProfiles={customerProfiles} companies={companies} run={run} />}
         {activeTab === "customerProfiles" && <CustomerProfilesBrowser profiles={customerProfiles} run={run} />}
         {activeTab === "orders" && <OrdersBrowser orders={orders} customers={customers} products={products} priceTables={priceTables} warehouses={warehouses} run={run} />}
         {activeTab === "customerManagement" && <CustomerManagementPage rows={customerMonitoring} run={run} />}
@@ -309,7 +326,7 @@ function lotTypeLabel(value) {
   return ({ seeds: "Sementes", general: "Geral", none: "Nao controla" }[value] || value || "Nao controla");
 }
 
-function ProductsBrowser({ products, groups, classes, warehouses, balances, movements, run }) {
+function ProductsBrowser({ products, groups, classes, warehouses, balances, movements, companies, run }) {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
   const rows = useMemo(() => filterRows(products, query, ["sku", "name", "product_group_name", "product_class_name"]), [products, query]);
@@ -350,15 +367,16 @@ function ProductsBrowser({ products, groups, classes, warehouses, balances, move
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/products/${item.id}`))} />,
       ])} />
-      {modal && <ProductModal state={modal} setState={setModal} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} run={run} onSave={save} />}
+      {modal && <ProductModal state={modal} setState={setModal} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} companies={companies} run={run} onSave={save} />}
     </Browser>
   );
 }
 
-function ProductModal({ state, setState, groups, classes, warehouses, balances, movements, run, onSave }) {
+function ProductModal({ state, setState, groups, classes, warehouses, balances, movements, companies, run, onSave }) {
   const { item, form } = state;
   const [activeTab, setActiveTab] = useState("data");
   const [lotConfig, setLotConfig] = useState({ controls_lot: item?.controls_lot || false, lot_type: item?.lot_type || "none" });
+  const [companyIds, setCompanyIds] = useState(item?.company_ids || []);
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
   const productBalances = item ? balances.filter((row) => String(row.product_external_id) === String(item.id)) : [];
   const productMovements = item ? movements.filter((row) => String(row.product_external_id) === String(item.id)) : [];
@@ -369,10 +387,20 @@ function ProductModal({ state, setState, groups, classes, warehouses, balances, 
     if (response) setState({ ...state, item: response.data });
   }
 
+  async function submit() {
+    if (activeTab === "companies" && item) {
+      const response = await run(() => api.put(`/products/${item.id}/companies`, { company_ids: companyIds }));
+      if (response) setState(null);
+      return;
+    }
+    await onSave(form, item);
+  }
+
   return (
-    <Modal title={item ? "Editar produto" : "Novo produto"} onClose={() => setState(null)} onSubmit={() => onSave(form, item)}>
+    <Modal title={item ? "Editar produto" : "Novo produto"} onClose={() => setState(null)} onSubmit={submit}>
       <div className="tabs">
         <button type="button" className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>Dados</button>
+        <button type="button" className={activeTab === "companies" ? "active" : ""} onClick={() => setActiveTab("companies")} disabled={!item}>Estabelecimentos</button>
         <button type="button" className={activeTab === "stock" ? "active" : ""} onClick={() => setActiveTab("stock")} disabled={!item}>Saldo</button>
       </div>
 
@@ -433,11 +461,18 @@ function ProductModal({ state, setState, groups, classes, warehouses, balances, 
           </details>
         </div>
       )}
+      {activeTab === "companies" && item && (
+        <CompanyLinksEditor
+          companies={companies}
+          linkedIds={item.company_ids || []}
+          onChange={setCompanyIds}
+        />
+      )}
     </Modal>
   );
 }
 
-function PriceTablesBrowser({ priceTables, products, run }) {
+function PriceTablesBrowser({ priceTables, products, companies, run }) {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
   const rows = useMemo(() => filterRows(priceTables, query, ["code", "name", "correction_mode"]), [priceTables, query]);
@@ -464,13 +499,15 @@ function PriceTablesBrowser({ priceTables, products, run }) {
         <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/price-tables/${item.id}`))} />,
       ])} />
 
-      {modal && <PriceTableModal state={modal} setState={setModal} products={products} run={run} onSave={save} />}
+      {modal && <PriceTableModal state={modal} setState={setModal} products={products} companies={companies} run={run} onSave={save} />}
     </Browser>
   );
 }
 
-function PriceTableModal({ state, setState, products, run, onSave }) {
+function PriceTableModal({ state, setState, products, companies, run, onSave }) {
   const { item, form } = state;
+  const [activeTab, setActiveTab] = useState("data");
+  const [companyIds, setCompanyIds] = useState(item?.company_ids || []);
   const [items, setItems] = useState([]);
   const [itemForm, setItemForm] = useState(emptyPriceItem);
   const [editingItem, setEditingItem] = useState(null);
@@ -565,29 +602,47 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
     });
   }
 
+  async function submit() {
+    if (activeTab === "companies" && item) {
+      const response = await run(() => api.put(`/price-tables/${item.id}/companies`, { company_ids: companyIds }));
+      if (response) setState(null);
+      return;
+    }
+    await onSave(form, item);
+  }
+
   return (
-    <Modal title={item ? "Editar tabela de preco" : "Nova tabela de preco"} onClose={() => setState(null)} onSubmit={() => onSave(form, item)}>
-      <div className="modal-grid">
-        <Field label="Codigo"><input required value={form.code} onChange={(e) => update("code", e.target.value.toUpperCase())} /></Field>
-        <Field label="Nome"><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
-        <Field label="Correcao"><select value={form.correction_mode} onChange={(e) => update("correction_mode", e.target.value)}><option value="outside">Por fora</option><option value="inside">Por dentro</option></select></Field>
-        <Field label="Taxa mensal %"><input type="number" step="0.0001" value={form.monthly_rate} onChange={(e) => update("monthly_rate", e.target.value)} /></Field>
-        <Field label="Data base"><input type="date" value={form.base_date} onChange={(e) => update("base_date", e.target.value)} /></Field>
-        <Check label="Ativa" checked={form.active} onChange={(v) => update("active", v)} />
+    <Modal title={item ? "Editar tabela de preco" : "Nova tabela de preco"} onClose={() => setState(null)} onSubmit={submit}>
+      <div className="tabs">
+        <button type="button" className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>Dados</button>
+        <button type="button" className={activeTab === "items" ? "active" : ""} onClick={() => setActiveTab("items")} disabled={!item}>Itens</button>
+        <button type="button" className={activeTab === "companies" ? "active" : ""} onClick={() => setActiveTab("companies")} disabled={!item}>Estabelecimentos</button>
       </div>
 
-      <section className="modal-detail">
-        <div className="panel-header">
-          <div>
-            <p>Itens da tabela</p>
-            <h2>Produtos e precos</h2>
-          </div>
+      {activeTab === "data" && (
+        <div className="modal-grid">
+          <Field label="Codigo"><input required value={form.code} onChange={(e) => update("code", e.target.value.toUpperCase())} /></Field>
+          <Field label="Nome"><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
+          <Field label="Correcao"><select value={form.correction_mode} onChange={(e) => update("correction_mode", e.target.value)}><option value="outside">Por fora</option><option value="inside">Por dentro</option></select></Field>
+          <Field label="Taxa mensal %"><input type="number" step="0.0001" value={form.monthly_rate} onChange={(e) => update("monthly_rate", e.target.value)} /></Field>
+          <Field label="Data base"><input type="date" value={form.base_date} onChange={(e) => update("base_date", e.target.value)} /></Field>
+          <Check label="Ativa" checked={form.active} onChange={(v) => update("active", v)} />
         </div>
+      )}
 
-        {!item?.id && <div className="empty-detail">Salve o cabecalho da tabela para incluir produtos.</div>}
+      {activeTab === "items" && (
+        <section className="modal-detail">
+          <div className="panel-header">
+            <div>
+              <p>Itens da tabela</p>
+              <h2>Produtos e precos</h2>
+            </div>
+          </div>
 
-        {item?.id && (
-          <>
+          {!item?.id && <div className="empty-detail">Salve o cabecalho da tabela para incluir produtos.</div>}
+
+          {item?.id && (
+            <>
             <div className="detail-form">
               <Field label="Produto" wide><Select value={itemForm.product_id} onChange={(v) => setItemForm({ ...itemForm, product_id: v })} options={products} empty="Selecione" /></Field>
               <Field label="Preco base"><input type="number" min="0" step="0.01" value={itemForm.base_price} onChange={(e) => setItemForm({ ...itemForm, base_price: e.target.value })} /></Field>
@@ -633,14 +688,23 @@ function PriceTableModal({ state, setState, products, run, onSave }) {
                 ])} />
               </section>
             )}
-          </>
-        )}
-      </section>
+            </>
+          )}
+        </section>
+      )}
+
+      {activeTab === "companies" && item && (
+        <CompanyLinksEditor
+          companies={companies}
+          linkedIds={item.company_ids || []}
+          onChange={setCompanyIds}
+        />
+      )}
     </Modal>
   );
 }
 
-function SimpleCatalogBrowser({ title, eyebrow, endpoint, items, template, run }) {
+function SimpleCatalogBrowser({ title, eyebrow, endpoint, items, template, run, companies = [], companyEndpoint = null }) {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
   const rows = useMemo(() => filterRows(items, query, ["code", "name", "description"]), [items, query]);
@@ -660,27 +724,56 @@ function SimpleCatalogBrowser({ title, eyebrow, endpoint, items, template, run }
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: { code: item.code, name: item.name, description: item.description || "", active: item.active } })} onRemove={() => run(() => api.delete(`${endpoint}/${item.id}`))} />,
       ])} />
-      {modal && <SimpleCatalogModal title={title} state={modal} setState={setModal} onSave={save} />}
+      {modal && <SimpleCatalogModal title={title} state={modal} setState={setModal} onSave={save} companies={companies} companyEndpoint={companyEndpoint} run={run} />}
     </Browser>
   );
 }
 
-function SimpleCatalogModal({ title, state, setState, onSave }) {
+function SimpleCatalogModal({ title, state, setState, onSave, companies = [], companyEndpoint = null, run }) {
   const { item, form } = state;
+  const [activeTab, setActiveTab] = useState("data");
+  const [companyIds, setCompanyIds] = useState(item?.company_ids || []);
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
+
+  async function submit() {
+    if (companyEndpoint && activeTab === "companies" && item) {
+      const response = await run(() => api.put(`${companyEndpoint}/${item.id}/companies`, { company_ids: companyIds }));
+      if (response) setState(null);
+      return;
+    }
+    await onSave(form, item);
+  }
+
   return (
-    <Modal title={item ? `Editar ${title.toLowerCase()}` : title} onClose={() => setState(null)} onSubmit={() => onSave(form, item)}>
-      <div className="modal-grid">
-        <Field label="Codigo"><input required value={form.code} onChange={(e) => update("code", e.target.value.toUpperCase())} /></Field>
-        <Field label="Nome"><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
-        <Field label="Descricao" wide><input value={form.description} onChange={(e) => update("description", e.target.value)} /></Field>
-        <Check label="Ativo" checked={form.active} onChange={(v) => update("active", v)} />
-      </div>
+    <Modal title={item ? `Editar ${title.toLowerCase()}` : title} onClose={() => setState(null)} onSubmit={submit}>
+      {companyEndpoint && (
+        <div className="tabs">
+          <button type="button" className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>Dados</button>
+          <button type="button" className={activeTab === "companies" ? "active" : ""} onClick={() => setActiveTab("companies")} disabled={!item}>Estabelecimentos</button>
+        </div>
+      )}
+
+      {activeTab === "data" && (
+        <div className="modal-grid">
+          <Field label="Codigo"><input required value={form.code} onChange={(e) => update("code", e.target.value.toUpperCase())} /></Field>
+          <Field label="Nome"><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
+          <Field label="Descricao" wide><input value={form.description} onChange={(e) => update("description", e.target.value)} /></Field>
+          <Check label="Ativo" checked={form.active} onChange={(v) => update("active", v)} />
+        </div>
+      )}
+
+      {companyEndpoint && activeTab === "companies" && item && (
+        <CompanyLinksEditor
+          companies={companies}
+          linkedIds={item.company_ids || []}
+          onChange={setCompanyIds}
+        />
+      )}
     </Modal>
   );
 }
 
-function ClassesBrowser({ classes, groups, run }) {
+function ClassesBrowser({ classes, groups, companies, run }) {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
   const rows = useMemo(() => filterRows(classes, query, ["code", "name", "product_group_name", "description"]), [classes, query]);
@@ -701,23 +794,50 @@ function ClassesBrowser({ classes, groups, run }) {
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: { product_group_id: item.product_group_id || "", code: item.code, name: item.name, description: item.description || "", active: item.active } })} onRemove={() => run(() => api.delete(`/product-classes/${item.id}`))} />,
       ])} />
-      {modal && <ClassModal state={modal} setState={setModal} groups={groups} onSave={save} />}
+      {modal && <ClassModal state={modal} setState={setModal} groups={groups} companies={companies} run={run} onSave={save} />}
     </Browser>
   );
 }
 
-function ClassModal({ state, setState, groups, onSave }) {
+function ClassModal({ state, setState, groups, companies, run, onSave }) {
   const { item, form } = state;
+  const [activeTab, setActiveTab] = useState("data");
+  const [companyIds, setCompanyIds] = useState(item?.company_ids || []);
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
+
+  async function submit() {
+    if (activeTab === "companies" && item) {
+      const response = await run(() => api.put(`/product-classes/${item.id}/companies`, { company_ids: companyIds }));
+      if (response) setState(null);
+      return;
+    }
+    await onSave(form, item);
+  }
+
   return (
-    <Modal title={item ? "Editar classe" : "Nova classe"} onClose={() => setState(null)} onSubmit={() => onSave(form, item)}>
-      <div className="modal-grid">
-        <Field label="Codigo"><input required value={form.code} onChange={(e) => update("code", e.target.value.toUpperCase())} /></Field>
-        <Field label="Nome"><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
-        <Field label="Grupo" wide><Select value={form.product_group_id} onChange={(v) => update("product_group_id", v)} options={groups} empty="Sem grupo" /></Field>
-        <Field label="Descricao" wide><input value={form.description} onChange={(e) => update("description", e.target.value)} /></Field>
-        <Check label="Ativa" checked={form.active} onChange={(v) => update("active", v)} />
+    <Modal title={item ? "Editar classe" : "Nova classe"} onClose={() => setState(null)} onSubmit={submit}>
+      <div className="tabs">
+        <button type="button" className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>Dados</button>
+        <button type="button" className={activeTab === "companies" ? "active" : ""} onClick={() => setActiveTab("companies")} disabled={!item}>Estabelecimentos</button>
       </div>
+
+      {activeTab === "data" && (
+        <div className="modal-grid">
+          <Field label="Codigo"><input required value={form.code} onChange={(e) => update("code", e.target.value.toUpperCase())} /></Field>
+          <Field label="Nome"><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
+          <Field label="Grupo" wide><Select value={form.product_group_id} onChange={(v) => update("product_group_id", v)} options={groups} empty="Sem grupo" /></Field>
+          <Field label="Descricao" wide><input value={form.description} onChange={(e) => update("description", e.target.value)} /></Field>
+          <Check label="Ativa" checked={form.active} onChange={(v) => update("active", v)} />
+        </div>
+      )}
+
+      {activeTab === "companies" && item && (
+        <CompanyLinksEditor
+          companies={companies}
+          linkedIds={item.company_ids || []}
+          onChange={setCompanyIds}
+        />
+      )}
     </Modal>
   );
 }
@@ -828,7 +948,7 @@ function CustomerProfileModal({ state, setState, onSave }) {
   );
 }
 
-function CustomersBrowser({ customers, customerProfiles, run }) {
+function CustomersBrowser({ customers, customerProfiles, companies, run }) {
   const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
   const rows = useMemo(() => filterRows(customers, query, ["name", "document_number", "email", "phone", "city", "customer_profile_name"]), [customers, query]);
@@ -865,7 +985,7 @@ function CustomersBrowser({ customers, customerProfiles, run }) {
             : <button type="button" className="link-button" onClick={() => setModal({ item, form: { customer_profile_id: item.customer_profile_id || "", name: item.name, document_number: item.document_number || "", email: item.email || "", phone: item.phone || "", city: item.city || "", state_code: item.state_code || "", active: item.active } })}>Perfil</button>,
         ];
       })} />
-      {modal && <CustomerModal state={modal} setState={setModal} customerProfiles={customerProfiles} onSave={save} run={run} />}
+      {modal && <CustomerModal state={modal} setState={setModal} customerProfiles={customerProfiles} companies={companies} onSave={save} run={run} />}
     </Browser>
   );
 }
@@ -946,8 +1066,10 @@ function CustomerManagementPage({ rows, run }) {
   );
 }
 
-function CustomerModal({ state, setState, customerProfiles, onSave, run }) {
+function CustomerModal({ state, setState, customerProfiles, companies, onSave, run }) {
   const { item, form } = state;
+  const [activeTab, setActiveTab] = useState("data");
+  const [companyIds, setCompanyIds] = useState(item?.company_ids || []);
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
   const isShared = item?.id?.startsWith("easyfinance:");
   async function saveSharedProfile() {
@@ -958,19 +1080,43 @@ function CustomerModal({ state, setState, customerProfiles, onSave, run }) {
     });
     if (saved) setState(null);
   }
+
+  async function submit() {
+    if (activeTab === "companies" && item) {
+      const [source, externalId] = item.id.split(":");
+      const response = await run(() => api.put(`/customers/${source}/${externalId}/companies`, { company_ids: companyIds }));
+      if (response) setState(null);
+      return;
+    }
+    await (isShared ? saveSharedProfile() : onSave(form, item));
+  }
+
   return (
-    <Modal title={item ? "Editar cliente" : "Novo cliente"} onClose={() => setState(null)} onSubmit={() => isShared ? saveSharedProfile() : onSave(form, item)}>
-      <div className="modal-grid">
-        <Field label="Perfil comercial" wide><Select required value={form.customer_profile_id} onChange={(v) => update("customer_profile_id", v)} options={customerProfiles} empty="Selecione" /></Field>
-        {isShared && <Field label="Limite de credito"><input disabled value={money.format(Number(item.credit_limit || 0))} /></Field>}
-        <Field label="Nome" wide><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
-        <Field label="CPF/CNPJ"><input value={form.document_number} onChange={(e) => update("document_number", e.target.value)} /></Field>
-        <Field label="E-mail"><input value={form.email} onChange={(e) => update("email", e.target.value)} /></Field>
-        <Field label="Telefone"><input value={form.phone} onChange={(e) => update("phone", e.target.value)} /></Field>
-        <Field label="Cidade"><input value={form.city} onChange={(e) => update("city", e.target.value)} /></Field>
-        <Field label="UF"><input maxLength="2" value={form.state_code} onChange={(e) => update("state_code", e.target.value.toUpperCase())} /></Field>
-        <Check label="Ativo" checked={form.active} onChange={(v) => update("active", v)} />
+    <Modal title={item ? "Editar cliente" : "Novo cliente"} onClose={() => setState(null)} onSubmit={submit}>
+      <div className="tabs">
+        <button type="button" className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>Dados</button>
+        <button type="button" className={activeTab === "companies" ? "active" : ""} onClick={() => setActiveTab("companies")} disabled={!item}>Estabelecimentos</button>
       </div>
+      {activeTab === "data" && (
+        <div className="modal-grid">
+          <Field label="Perfil comercial" wide><Select required value={form.customer_profile_id} onChange={(v) => update("customer_profile_id", v)} options={customerProfiles} empty="Selecione" /></Field>
+          {isShared && <Field label="Limite de credito"><input disabled value={money.format(Number(item.credit_limit || 0))} /></Field>}
+          <Field label="Nome" wide><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
+          <Field label="CPF/CNPJ"><input value={form.document_number} onChange={(e) => update("document_number", e.target.value)} /></Field>
+          <Field label="E-mail"><input value={form.email} onChange={(e) => update("email", e.target.value)} /></Field>
+          <Field label="Telefone"><input value={form.phone} onChange={(e) => update("phone", e.target.value)} /></Field>
+          <Field label="Cidade"><input value={form.city} onChange={(e) => update("city", e.target.value)} /></Field>
+          <Field label="UF"><input maxLength="2" value={form.state_code} onChange={(e) => update("state_code", e.target.value.toUpperCase())} /></Field>
+          <Check label="Ativo" checked={form.active} onChange={(v) => update("active", v)} />
+        </div>
+      )}
+      {activeTab === "companies" && item && (
+        <CompanyLinksEditor
+          companies={companies}
+          linkedIds={item.company_ids || []}
+          onChange={setCompanyIds}
+        />
+      )}
     </Modal>
   );
 }
@@ -1563,6 +1709,36 @@ function Field({ label, wide, children }) {
 
 function Check({ label, checked, onChange }) {
   return <label className="check-row"><input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} /> {label}</label>;
+}
+
+function CompanyLinksEditor({ companies, linkedIds, onChange }) {
+  const [selected, setSelected] = useState(() => new Set((linkedIds || []).map(String)));
+  useEffect(() => {
+    const initial = (linkedIds || []).map(String);
+    setSelected(new Set(initial));
+    onChange?.(initial.map(Number));
+  }, [linkedIds]);
+  function toggle(companyId, checked) {
+    const next = new Set(selected);
+    if (checked) next.add(String(companyId));
+    else next.delete(String(companyId));
+    setSelected(next);
+    onChange?.(Array.from(next).map(Number));
+  }
+  return (
+    <div className="company-links">
+      {companies.map((company) => (
+        <label className="company-link-row" key={company.id}>
+          <input type="checkbox" checked={selected.has(String(company.id))} onChange={(event) => toggle(company.id, event.target.checked)} />
+          <span>
+            <strong>{company.code} - {company.name}</strong>
+            <small>{company.company_kind === "branch" ? "Filial" : "Matriz"}</small>
+          </span>
+        </label>
+      ))}
+      {companies.length === 0 && <div className="empty-detail">Nenhuma empresa cadastrada.</div>}
+    </div>
+  );
 }
 
 function Select({ value, onChange, options, empty, required, labelKey = "name", valueKey = "id" }) {

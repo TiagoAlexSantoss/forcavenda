@@ -1,7 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 
-from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import Base, engine, get_db
 from app.models import (
+    Company,
     CustomerLink,
     CustomerProfile,
     CustomerProfilePaymentRule,
@@ -24,6 +25,8 @@ from app.models import (
     SalesOrderPayment,
 )
 from app.schemas import (
+    CompanyLinkUpdate,
+    CompanyRead,
     CustomerCreate,
     CustomerMonitoringRead,
     CustomerProfileAssign,
@@ -85,7 +88,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[settings.frontend_origin, "http://127.0.0.1:5190", "http://localhost:5190"],
-    allow_origin_regex=r"^http://(127\.0\.0\.1|localhost):\d+$",
+    allow_origin_regex=r"^http://(127\.0\.0\.1|localhost|(?:10|172|192)\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -96,6 +99,21 @@ app.add_middleware(
 async def startup():
     Base.metadata.create_all(bind=engine)
     with engine.begin() as connection:
+        connection.execute(text("CREATE TABLE IF NOT EXISTS control_companies (id SERIAL PRIMARY KEY, parent_company_id INTEGER REFERENCES control_companies(id), code VARCHAR(40) UNIQUE NOT NULL, name VARCHAR(160) NOT NULL, legal_name VARCHAR(180), document_number VARCHAR(40), company_kind VARCHAR(20) NOT NULL DEFAULT 'matrix', active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"))
+        connection.execute(text("INSERT INTO control_companies (code, name, company_kind, active) SELECT 'MATRIZ', 'Matriz', 'matrix', TRUE WHERE NOT EXISTS (SELECT 1 FROM control_companies)"))
+        default_company_id = connection.execute(text("SELECT id FROM control_companies WHERE active = TRUE ORDER BY id LIMIT 1")).scalar()
+        connection.execute(text("CREATE TABLE IF NOT EXISTS control_product_companies (id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES control_companies(id), product_source VARCHAR(40) NOT NULL, product_external_id VARCHAR(80) NOT NULL, default_warehouse_id INTEGER, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, CONSTRAINT uq_control_product_company UNIQUE (product_source, product_external_id, company_id))"))
+        connection.execute(text("ALTER TABLE control_product_companies ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP"))
+        connection.execute(text("ALTER TABLE control_product_companies ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_control_product_companies_company_product ON control_product_companies (company_id, product_source, product_external_id)"))
+        connection.execute(text("CREATE TABLE IF NOT EXISTS control_person_companies (id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES control_companies(id), person_source VARCHAR(40) NOT NULL, person_external_id VARCHAR(80) NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, CONSTRAINT uq_control_person_company UNIQUE (person_source, person_external_id, company_id))"))
+        connection.execute(text("ALTER TABLE control_person_companies ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP"))
+        connection.execute(text("ALTER TABLE control_person_companies ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_control_person_companies_company_person ON control_person_companies (company_id, person_source, person_external_id)"))
+        connection.execute(text("CREATE TABLE IF NOT EXISTS control_catalog_companies (id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES control_companies(id), catalog_key VARCHAR(80) NOT NULL, record_id VARCHAR(80) NOT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, CONSTRAINT uq_control_catalog_company UNIQUE (catalog_key, record_id, company_id))"))
+        connection.execute(text("ALTER TABLE control_catalog_companies ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP"))
+        connection.execute(text("ALTER TABLE control_catalog_companies ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_control_catalog_companies_company_record ON control_catalog_companies (company_id, catalog_key, record_id)"))
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS purchase_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS cost_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS default_warehouse_id INTEGER"))
@@ -117,7 +135,13 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS warehouse_name VARCHAR(160)"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS financial_approved_at TIMESTAMP"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS commercial_approved_at TIMESTAMP"))
+        connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES control_companies(id)"))
+        connection.execute(text("UPDATE sf_sales_orders SET company_id = :company_id WHERE company_id IS NULL"), {"company_id": default_company_id})
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_sf_sales_orders_company_status ON sf_sales_orders (company_id, status, approval_stage)"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS warehouse_id INTEGER"))
+        connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES control_companies(id)"))
+        connection.execute(text("UPDATE sf_sales_order_items SET company_id = COALESCE((SELECT o.company_id FROM sf_sales_orders o WHERE o.id = sf_sales_order_items.order_id), :company_id) WHERE company_id IS NULL"), {"company_id": default_company_id})
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_sf_sales_order_items_company_product ON sf_sales_order_items (company_id, product_id)"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS warehouse_name VARCHAR(160)"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS cost_unit_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS total_cost_amount NUMERIC(14, 2) NOT NULL DEFAULT 0"))
@@ -133,6 +157,12 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS commercial_reason VARCHAR(800)"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS cancellation_status VARCHAR(30) NOT NULL DEFAULT 'active'"))
         connection.execute(text("ALTER TABLE flow_balance_ledger ALTER COLUMN stock_movement_id DROP NOT NULL"))
+        connection.execute(text("ALTER TABLE sf_sales_order_payments ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES control_companies(id)"))
+        connection.execute(text("UPDATE sf_sales_order_payments SET company_id = COALESCE((SELECT o.company_id FROM sf_sales_orders o WHERE o.id = sf_sales_order_payments.order_id), :company_id) WHERE company_id IS NULL"), {"company_id": default_company_id})
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_sf_sales_order_payments_company_id ON sf_sales_order_payments (company_id)"))
+        connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES control_companies(id)"))
+        connection.execute(text("UPDATE flow_balance_ledger SET company_id = COALESCE((SELECT o.company_id FROM sf_sales_orders o WHERE CAST(o.id AS VARCHAR) = flow_balance_ledger.source_document_id AND flow_balance_ledger.source_system = 'easysales' AND flow_balance_ledger.source_document_kind = 'sales_order'), :company_id) WHERE company_id IS NULL"), {"company_id": default_company_id})
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_flow_balance_ledger_company_product_warehouse ON flow_balance_ledger (company_id, product_source, product_external_id, warehouse_id, balance_type_id)"))
         connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_system VARCHAR(40)"))
         connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_document_kind VARCHAR(40)"))
         connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_document_id VARCHAR(80)"))
@@ -144,6 +174,12 @@ async def startup():
         connection.execute(text("UPDATE sf_sales_order_items SET min_unit_price = ROUND(corrected_unit_price * 0.95, 2) WHERE min_unit_price = 0"))
         connection.execute(text("UPDATE sf_sales_order_items SET max_unit_price = ROUND(corrected_unit_price * 1.05, 2) WHERE max_unit_price = 0"))
         connection.execute(text("UPDATE sf_sales_orders SET order_type = 'sale' WHERE order_type IS NULL OR order_type = ''"))
+        connection.execute(text("INSERT INTO control_product_companies (company_id, product_source, product_external_id, default_warehouse_id, active) SELECT :company_id, 'easysales', CAST(p.id AS VARCHAR), p.default_warehouse_id, TRUE FROM sf_products p WHERE NOT EXISTS (SELECT 1 FROM control_product_companies pc WHERE pc.company_id = :company_id AND pc.product_source = 'easysales' AND pc.product_external_id = CAST(p.id AS VARCHAR))"), {"company_id": default_company_id})
+        connection.execute(text("INSERT INTO control_person_companies (company_id, person_source, person_external_id, active) SELECT :company_id, source, COALESCE(external_id, CAST(id AS VARCHAR)), TRUE FROM sf_customer_links c WHERE NOT EXISTS (SELECT 1 FROM control_person_companies pc WHERE pc.company_id = :company_id AND pc.person_source = c.source AND pc.person_external_id = COALESCE(c.external_id, CAST(c.id AS VARCHAR)))"), {"company_id": default_company_id})
+        connection.execute(text("INSERT INTO control_person_companies (company_id, person_source, person_external_id, active) SELECT :company_id, 'easyfinance', CAST(p.id AS VARCHAR), TRUE FROM people p WHERE p.is_customer = TRUE AND NOT EXISTS (SELECT 1 FROM control_person_companies pc WHERE pc.company_id = :company_id AND pc.person_source = 'easyfinance' AND pc.person_external_id = CAST(p.id AS VARCHAR))"), {"company_id": default_company_id})
+        connection.execute(text("INSERT INTO control_catalog_companies (company_id, catalog_key, record_id, active) SELECT :company_id, 'sf_product_groups', CAST(id AS VARCHAR), TRUE FROM sf_product_groups g WHERE NOT EXISTS (SELECT 1 FROM control_catalog_companies cc WHERE cc.company_id = :company_id AND cc.catalog_key = 'sf_product_groups' AND cc.record_id = CAST(g.id AS VARCHAR))"), {"company_id": default_company_id})
+        connection.execute(text("INSERT INTO control_catalog_companies (company_id, catalog_key, record_id, active) SELECT :company_id, 'sf_product_classes', CAST(id AS VARCHAR), TRUE FROM sf_product_classes c WHERE NOT EXISTS (SELECT 1 FROM control_catalog_companies cc WHERE cc.company_id = :company_id AND cc.catalog_key = 'sf_product_classes' AND cc.record_id = CAST(c.id AS VARCHAR))"), {"company_id": default_company_id})
+        connection.execute(text("INSERT INTO control_catalog_companies (company_id, catalog_key, record_id, active) SELECT :company_id, 'sf_price_tables', CAST(id AS VARCHAR), TRUE FROM sf_price_tables pt WHERE NOT EXISTS (SELECT 1 FROM control_catalog_companies cc WHERE cc.company_id = :company_id AND cc.catalog_key = 'sf_price_tables' AND cc.record_id = CAST(pt.id AS VARCHAR))"), {"company_id": default_company_id})
     seed_customer_profiles()
     db = next(get_db())
     try:
@@ -159,6 +195,192 @@ def normalize_code(value: str, field_name: str = "Codigo") -> str:
     if not code:
         raise HTTPException(status_code=400, detail=f"{field_name} e obrigatorio")
     return code
+
+
+def default_company_id(db: Session) -> int:
+    company_id = db.scalar(select(Company.id).where(Company.active == True).order_by(Company.id.asc()))
+    if not company_id:
+        company = Company(code="MATRIZ", name="Matriz", company_kind="matrix", active=True)
+        db.add(company)
+        db.flush()
+        return company.id
+    return company_id
+
+
+def active_company_id(request: Request, db: Session) -> int:
+    raw = request.headers.get("X-Company-Id") or request.query_params.get("company_id")
+    company_id = int(raw) if raw else default_company_id(db)
+    company = db.get(Company, company_id)
+    if not company or not company.active:
+        raise HTTPException(status_code=400, detail="Empresa ativa invalida")
+    return company.id
+
+
+def company_ids_for_product(db: Session, product_id: int) -> list[int]:
+    return [int(row) for row in db.execute(
+        text(
+            """
+            SELECT company_id
+            FROM control_product_companies
+            WHERE product_source = 'easysales' AND product_external_id = :product_id AND active = TRUE
+            ORDER BY company_id
+            """
+        ),
+        {"product_id": str(product_id)},
+    ).scalars().all()]
+
+
+def company_ids_for_person(db: Session, source: str, external_id: str) -> list[int]:
+    return [int(row) for row in db.execute(
+        text(
+            """
+            SELECT company_id
+            FROM control_person_companies
+            WHERE person_source = :source AND person_external_id = :external_id AND active = TRUE
+            ORDER BY company_id
+            """
+        ),
+        {"source": source, "external_id": str(external_id)},
+    ).scalars().all()]
+
+
+def ensure_product_company(db: Session, company_id: int, product_id: int, default_warehouse_id: int | None = None):
+    db.execute(
+        text(
+            """
+            INSERT INTO control_product_companies (company_id, product_source, product_external_id, default_warehouse_id, active, created_at, updated_at)
+            VALUES (:company_id, 'easysales', :product_id, :default_warehouse_id, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (product_source, product_external_id, company_id)
+            DO UPDATE SET active = TRUE, default_warehouse_id = COALESCE(EXCLUDED.default_warehouse_id, control_product_companies.default_warehouse_id), updated_at = CURRENT_TIMESTAMP
+            """
+        ),
+        {"company_id": company_id, "product_id": str(product_id), "default_warehouse_id": default_warehouse_id},
+    )
+
+
+def replace_product_companies(db: Session, product_id: int, company_ids: list[int], default_warehouse_id: int | None = None):
+    if not company_ids:
+        raise HTTPException(status_code=400, detail="Informe pelo menos uma empresa")
+    valid_count = db.scalar(select(func.count(Company.id)).where(Company.id.in_(company_ids), Company.active == True))
+    if valid_count != len(set(company_ids)):
+        raise HTTPException(status_code=400, detail="Empresa invalida na lista")
+    db.execute(
+        text("UPDATE control_product_companies SET active = FALSE, updated_at = CURRENT_TIMESTAMP WHERE product_source = 'easysales' AND product_external_id = :product_id"),
+        {"product_id": str(product_id)},
+    )
+    for company_id in sorted(set(company_ids)):
+        ensure_product_company(db, company_id, product_id, default_warehouse_id)
+
+
+def ensure_person_company(db: Session, company_id: int, source: str, external_id: str):
+    db.execute(
+        text(
+            """
+            INSERT INTO control_person_companies (company_id, person_source, person_external_id, active, created_at, updated_at)
+            VALUES (:company_id, :source, :external_id, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (person_source, person_external_id, company_id)
+            DO UPDATE SET active = TRUE, updated_at = CURRENT_TIMESTAMP
+            """
+        ),
+        {"company_id": company_id, "source": source, "external_id": str(external_id)},
+    )
+
+
+def replace_person_companies(db: Session, source: str, external_id: str, company_ids: list[int]):
+    if not company_ids:
+        raise HTTPException(status_code=400, detail="Informe pelo menos uma empresa")
+    valid_count = db.scalar(select(func.count(Company.id)).where(Company.id.in_(company_ids), Company.active == True))
+    if valid_count != len(set(company_ids)):
+        raise HTTPException(status_code=400, detail="Empresa invalida na lista")
+    db.execute(
+        text("UPDATE control_person_companies SET active = FALSE, updated_at = CURRENT_TIMESTAMP WHERE person_source = :source AND person_external_id = :external_id"),
+        {"source": source, "external_id": str(external_id)},
+    )
+    for company_id in sorted(set(company_ids)):
+        ensure_person_company(db, company_id, source, external_id)
+
+
+def catalog_company_ids(db: Session, catalog_key: str, record_id: str | int) -> list[int]:
+    rows = db.execute(
+        text(
+            """
+            SELECT company_id
+            FROM control_catalog_companies
+            WHERE catalog_key = :catalog_key AND record_id = :record_id AND active = TRUE
+            ORDER BY company_id
+            """
+        ),
+        {"catalog_key": catalog_key, "record_id": str(record_id)},
+    ).scalars().all()
+    return [int(row) for row in rows]
+
+
+def ensure_catalog_company(db: Session, company_id: int, catalog_key: str, record_id: str | int):
+    db.execute(
+        text(
+            """
+            INSERT INTO control_catalog_companies (company_id, catalog_key, record_id, active, created_at, updated_at)
+            VALUES (:company_id, :catalog_key, :record_id, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (catalog_key, record_id, company_id)
+            DO UPDATE SET active = TRUE, updated_at = CURRENT_TIMESTAMP
+            """
+        ),
+        {"company_id": company_id, "catalog_key": catalog_key, "record_id": str(record_id)},
+    )
+
+
+def replace_catalog_companies(db: Session, catalog_key: str, record_id: str | int, company_ids: list[int]):
+    if not company_ids:
+        raise HTTPException(status_code=400, detail="Informe pelo menos uma empresa")
+    valid_count = db.scalar(select(func.count(Company.id)).where(Company.id.in_(company_ids), Company.active == True))
+    if valid_count != len(set(company_ids)):
+        raise HTTPException(status_code=400, detail="Empresa invalida na lista")
+    db.execute(
+        text("UPDATE control_catalog_companies SET active = FALSE, updated_at = CURRENT_TIMESTAMP WHERE catalog_key = :catalog_key AND record_id = :record_id"),
+        {"catalog_key": catalog_key, "record_id": str(record_id)},
+    )
+    for company_id in sorted(set(company_ids)):
+        ensure_catalog_company(db, company_id, catalog_key, record_id)
+
+
+def catalog_available_for_company(db: Session, company_id: int, catalog_key: str, record_id: str | int) -> bool:
+    return bool(db.execute(
+        text(
+            """
+            SELECT 1
+            FROM control_catalog_companies
+            WHERE company_id = :company_id
+              AND catalog_key = :catalog_key
+              AND record_id = :record_id
+              AND active = TRUE
+            """
+        ),
+        {"company_id": company_id, "catalog_key": catalog_key, "record_id": str(record_id)},
+    ).first())
+
+
+def product_available_for_company(db: Session, company_id: int, product_id: int) -> bool:
+    return bool(db.execute(
+        text(
+            """
+            SELECT 1 FROM control_product_companies
+            WHERE company_id = :company_id AND product_source = 'easysales' AND product_external_id = :product_id AND active = TRUE
+            """
+        ),
+        {"company_id": company_id, "product_id": str(product_id)},
+    ).first())
+
+
+def person_available_for_company(db: Session, company_id: int, source: str, external_id: str) -> bool:
+    return bool(db.execute(
+        text(
+            """
+            SELECT 1 FROM control_person_companies
+            WHERE company_id = :company_id AND person_source = :source AND person_external_id = :external_id AND active = TRUE
+            """
+        ),
+        {"company_id": company_id, "source": source, "external_id": str(external_id)},
+    ).first())
 
 
 def normalize_order_type(value: str | None) -> str:
@@ -318,6 +540,18 @@ def class_to_read(db: Session, item: ProductClass) -> dict:
         "name": item.name,
         "description": item.description,
         "active": item.active,
+        "company_ids": catalog_company_ids(db, "sf_product_classes", item.id),
+    }
+
+
+def group_to_read(db: Session, item: ProductGroup) -> dict:
+    return {
+        "id": item.id,
+        "code": item.code,
+        "name": item.name,
+        "description": item.description,
+        "active": item.active,
+        "company_ids": catalog_company_ids(db, "sf_product_groups", item.id),
     }
 
 
@@ -343,6 +577,7 @@ def product_to_read(db: Session, item: Product) -> dict:
         "lot_type": lot_config["lot_type"] if lot_config else "none",
         "description": item.description,
         "active": item.active,
+        "company_ids": company_ids_for_product(db, item.id),
     }
 
 
@@ -402,6 +637,19 @@ def get_price_table_or_404(db: Session, price_table_id: int) -> PriceTable:
     if not table:
         raise HTTPException(status_code=404, detail="Tabela de preco nao encontrada")
     return table
+
+
+def price_table_to_read(db: Session, table: PriceTable) -> dict:
+    return {
+        "id": table.id,
+        "code": table.code,
+        "name": table.name,
+        "correction_mode": table.correction_mode,
+        "monthly_rate": table.monthly_rate,
+        "base_date": table.base_date,
+        "active": table.active,
+        "company_ids": catalog_company_ids(db, "sf_price_tables", table.id),
+    }
 
 
 def price_table_item_to_read(db: Session, item: PriceTableItem) -> dict:
@@ -576,12 +824,12 @@ def sync_order_balance_ledger(db: Session, order: SalesOrder, strict: bool = Tru
                 text(
                     """
                     INSERT INTO flow_balance_ledger (
-                        stock_movement_id, source_system, source_document_kind, source_document_id, source_item_id,
+                        company_id, stock_movement_id, source_system, source_document_kind, source_document_id, source_item_id,
                         warehouse_id, balance_type_id, balance_code, balance_name,
                         product_source, product_external_id, product_sku, product_name, quantity, created_at
                     )
                     VALUES (
-                        NULL, 'easysales', 'sales_order', :order_id, :item_id,
+                        :company_id, NULL, 'easysales', 'sales_order', :order_id, :item_id,
                         :warehouse_id, :balance_type_id, :balance_code, :balance_name,
                         'easysales', :product_id, :product_sku, :product_name, :quantity, CURRENT_TIMESTAMP
                     )
@@ -589,6 +837,7 @@ def sync_order_balance_ledger(db: Session, order: SalesOrder, strict: bool = Tru
                 ),
                 {
                     "order_id": str(order.id),
+                    "company_id": order.company_id,
                     "item_id": str(item.id),
                     "warehouse_id": warehouse_id,
                     "balance_type_id": effect["balance_type_id"],
@@ -677,6 +926,13 @@ def resolve_customer(db: Session, customer_id: str) -> dict:
 def next_order_number(db: Session) -> str:
     latest_id = db.scalar(select(SalesOrder.id).order_by(SalesOrder.id.desc()))
     return f"PV-{(latest_id or 0) + 1:06d}"
+
+
+def order_for_company_or_404(db: Session, order_id: int, company_id: int) -> SalesOrder:
+    order = db.get(SalesOrder, order_id)
+    if not order or order.company_id != company_id:
+        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+    return order
 
 
 def resolve_warehouse(db: Session, warehouse_id: int | None) -> dict | None:
@@ -795,6 +1051,7 @@ def order_to_read(db: Session, order: SalesOrder) -> dict:
     payment_suggestions = db.scalars(select(SalesOrderPayment).where(SalesOrderPayment.order_id == order.id).order_by(SalesOrderPayment.due_date.asc(), SalesOrderPayment.id.asc())).all()
     return {
         "id": order.id,
+        "company_id": order.company_id,
         "order_number": order.order_number,
         "order_type": order.order_type or "sale",
         "customer_source": order.customer_source,
@@ -1108,6 +1365,8 @@ def apply_payload_to_order_item(db: Session, order: SalesOrder, table: PriceTabl
     product = db.get(Product, payload_item.product_id)
     if not product or not product.active:
         raise HTTPException(status_code=400, detail="Produto inativo ou nao encontrado")
+    if not product_available_for_company(db, order.company_id, product.id):
+        raise HTTPException(status_code=400, detail=f"Produto {product.sku} nao vinculado a empresa do pedido")
     price_item = db.scalar(
         select(PriceTableItem).where(
             PriceTableItem.price_table_id == table.id,
@@ -1129,7 +1388,8 @@ def apply_payload_to_order_item(db: Session, order: SalesOrder, table: PriceTabl
     item_total = money_round(quantity * negotiated_unit_price)
     item_total_cost = money_round(quantity * cost_unit_price)
     item_profit = money_round(item_total - item_total_cost)
-    item = item or SalesOrderItem(order_id=order.id, cancelled_quantity=Decimal("0"), cancellation_status="active")
+    item = item or SalesOrderItem(order_id=order.id, company_id=order.company_id, cancelled_quantity=Decimal("0"), cancellation_status="active")
+    item.company_id = order.company_id
     warehouse = resolve_warehouse(db, payload_item.warehouse_id or product.default_warehouse_id)
     item.product_id = product.id
     item.product_sku = product.sku
@@ -1167,10 +1427,139 @@ def health():
     return {"ok": True, "service": "easysales", "customer_provider": settings.customer_provider}
 
 
+@app.get("/companies", response_model=list[CompanyRead], tags=["Sistema"])
+def list_companies(db: Session = Depends(get_db)):
+    return db.scalars(select(Company).where(Company.active == True).order_by(Company.company_kind.desc(), Company.name.asc())).all()
+
+
+@app.get("/control/browser-definitions", tags=["Sistema"])
+def list_control_browser_definitions(db: Session = Depends(get_db)):
+    try:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    b.id AS browser_id,
+                    b.code AS browser_code,
+                    b.name AS browser_name,
+                    b.description AS browser_description,
+                    b.scope AS browser_scope,
+                    b.source_mode AS source_mode,
+                    b.is_standard AS is_standard,
+                    e.code AS entity_code,
+                    e.display_name AS entity_name,
+                    f.id AS field_id,
+                    f.technical_name AS field_name,
+                    COALESCE(c.label_override, f.display_name) AS field_label,
+                    f.data_type AS field_type,
+                    f.filterable AS field_filterable,
+                    f.sortable AS field_sortable,
+                    c.ordinal AS column_ordinal,
+                    c.width AS column_width
+                FROM control_browser_definitions b
+                JOIN control_metadata_entities e ON e.id = b.entity_id
+                LEFT JOIN control_browser_columns c ON c.browser_id = b.id AND c.active = TRUE
+                LEFT JOIN control_metadata_fields f ON f.id = c.field_id AND f.active = TRUE
+                WHERE b.active = TRUE
+                  AND e.active = TRUE
+                ORDER BY e.display_name, b.name, c.ordinal, f.display_name
+                """
+            )
+        ).mappings().all()
+    except Exception:
+        return []
+    browsers = {}
+    for row in rows:
+        browser = browsers.setdefault(
+            row["browser_id"],
+            {
+                "id": row["browser_id"],
+                "code": row["browser_code"],
+                "name": row["browser_name"],
+                "description": row["browser_description"],
+                "scope": row["browser_scope"],
+                "source_mode": row["source_mode"],
+                "is_standard": row["is_standard"],
+                "entity_code": row["entity_code"],
+                "entity_name": row["entity_name"],
+                "columns": [],
+                "filters": [],
+            },
+        )
+        if row["field_id"]:
+            browser["columns"].append(
+                {
+                    "id": row["field_id"],
+                    "name": row["field_name"],
+                    "label": row["field_label"],
+                    "type": row["field_type"],
+                    "filterable": row["field_filterable"],
+                    "sortable": row["field_sortable"],
+                    "ordinal": row["column_ordinal"],
+                    "width": row["column_width"],
+                }
+            )
+    try:
+        filter_rows = db.execute(
+            text(
+                """
+                SELECT
+                    bf.id,
+                    bf.browser_id,
+                    f.technical_name AS field_name,
+                    COALESCE(f.display_name, f.technical_name) AS field_label,
+                    f.data_type AS field_type,
+                    bf.operator,
+                    bf.value,
+                    bf.value_to,
+                    bf.behavior,
+                    bf.value_kind,
+                    bf.required,
+                    bf.ordinal,
+                    bf.active
+                FROM control_browser_filters bf
+                JOIN control_metadata_fields f ON f.id = bf.field_id
+                WHERE bf.active = TRUE
+                ORDER BY bf.browser_id, bf.ordinal, f.display_name
+                """
+            )
+        ).mappings().all()
+        for row in filter_rows:
+            browser = browsers.get(row["browser_id"])
+            if not browser:
+                continue
+            browser["filters"].append(
+                {
+                    "id": row["id"],
+                    "field": row["field_name"],
+                    "label": row["field_label"],
+                    "type": row["field_type"],
+                    "operator": row["operator"],
+                    "value": row["value"],
+                    "valueTo": row["value_to"],
+                    "behavior": row["behavior"],
+                    "valueKind": row["value_kind"],
+                    "required": row["required"],
+                    "ordinal": row["ordinal"],
+                }
+            )
+    except Exception:
+        pass
+    return list(browsers.values())
+
+
 @app.get("/customers", response_model=list[CustomerRead], tags=["Clientes"])
-def list_customers(db: Session = Depends(get_db)):
+def list_customers(request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
     local_links = db.scalars(
-        select(CustomerLink).where(CustomerLink.source == "local", CustomerLink.active == True).order_by(CustomerLink.name.asc())
+        select(CustomerLink)
+        .where(
+            CustomerLink.source == "local",
+            CustomerLink.active == True,
+            text("EXISTS (SELECT 1 FROM control_person_companies pc WHERE pc.company_id = :company_id AND pc.person_source = 'local' AND pc.person_external_id = CAST(sf_customer_links.id AS VARCHAR) AND pc.active = TRUE)"),
+        )
+        .params(company_id=company_id)
+        .order_by(CustomerLink.name.asc())
     ).all()
     local_rows = [
         {
@@ -1186,6 +1575,7 @@ def list_customers(db: Session = Depends(get_db)):
             "city": item.city,
             "state_code": item.state_code,
             "active": item.active,
+            "company_ids": company_ids_for_person(db, item.source, str(item.id)),
         }
         for item in local_links
     ]
@@ -1194,14 +1584,20 @@ def list_customers(db: Session = Depends(get_db)):
             rows = db.execute(
                 text(
                     """
-                    SELECT id, name, document_number, email, phone, city, state_code, active, credit_limit
+                    SELECT people.id, people.name, people.document_number, people.email, people.phone, people.city, people.state_code, people.active, people.credit_limit
                     FROM people
+                    JOIN control_person_companies pc ON pc.person_source = 'easyfinance'
+                        AND pc.person_external_id = CAST(people.id AS VARCHAR)
+                        AND pc.company_id = :company_id
+                        AND pc.active = TRUE
                     WHERE is_customer = TRUE AND active = TRUE
                     ORDER BY name ASC
                     """
-                )
+                ),
+                {"company_id": company_id},
             ).mappings().all()
         except SQLAlchemyError:
+            db.rollback()
             rows = []
         shared_rows = [
             {
@@ -1217,6 +1613,7 @@ def list_customers(db: Session = Depends(get_db)):
                 "city": row["city"],
                 "state_code": row["state_code"],
                 "active": row["active"],
+                "company_ids": company_ids_for_person(db, "easyfinance", str(row["id"])),
             }
             for row in rows
         ]
@@ -1237,7 +1634,8 @@ def list_warehouses(db: Session = Depends(get_db)):
 
 
 @app.post("/customers", response_model=CustomerRead, status_code=status.HTTP_201_CREATED, tags=["Clientes"])
-def create_customer(payload: CustomerCreate, db: Session = Depends(get_db)):
+def create_customer(payload: CustomerCreate, request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
     get_profile_or_404(db, payload.customer_profile_id)
     item = CustomerLink(
         customer_profile_id=payload.customer_profile_id,
@@ -1252,6 +1650,9 @@ def create_customer(payload: CustomerCreate, db: Session = Depends(get_db)):
         active=payload.active,
     )
     db.add(item)
+    db.flush()
+    item.external_id = str(item.id)
+    ensure_person_company(db, company_id, "local", str(item.id))
     db.commit()
     db.refresh(item)
     return {
@@ -1267,6 +1668,7 @@ def create_customer(payload: CustomerCreate, db: Session = Depends(get_db)):
         "city": item.city,
         "state_code": item.state_code,
         "active": item.active,
+        "company_ids": company_ids_for_person(db, item.source, str(item.id)),
     }
 
 
@@ -1299,7 +1701,27 @@ def update_customer(customer_id: int, payload: CustomerUpdate, db: Session = Dep
         "city": item.city,
         "state_code": item.state_code,
         "active": item.active,
+        "company_ids": company_ids_for_person(db, item.source, str(item.id)),
     }
+
+
+@app.put("/customers/{source}/{external_id}/companies", response_model=list[int], tags=["Clientes"])
+def update_customer_companies(source: str, external_id: str, payload: CompanyLinkUpdate, db: Session = Depends(get_db)):
+    if source == "local":
+        link = db.get(CustomerLink, int(external_id)) if external_id.isdigit() else None
+        if not link or link.source != "local":
+            raise HTTPException(status_code=404, detail="Cliente local nao encontrado")
+        person_external_id = str(link.id)
+    elif source == "easyfinance":
+        row = db.execute(text("SELECT id FROM people WHERE id = :id AND is_customer = TRUE"), {"id": external_id}).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Cliente EasyFinance nao encontrado")
+        person_external_id = external_id
+    else:
+        raise HTTPException(status_code=400, detail="Origem do cliente invalida")
+    replace_person_companies(db, source, person_external_id, payload.company_ids)
+    db.commit()
+    return company_ids_for_person(db, source, person_external_id)
 
 
 @app.delete("/customers/{customer_id}", tags=["Clientes"])
@@ -1380,7 +1802,7 @@ def delete_customer_profile(profile_id: int, db: Session = Depends(get_db)):
 
 
 @app.put("/customers/{source}/{external_id}/profile", response_model=CustomerRead, tags=["Clientes"])
-def assign_customer_profile(source: str, external_id: str, payload: CustomerProfileAssign, db: Session = Depends(get_db)):
+def assign_customer_profile(source: str, external_id: str, payload: CustomerProfileAssign, request: Request, db: Session = Depends(get_db)):
     get_profile_or_404(db, payload.customer_profile_id)
     if source == "local":
         link = db.get(CustomerLink, int(external_id)) if external_id.isdigit() else None
@@ -1408,13 +1830,13 @@ def assign_customer_profile(source: str, external_id: str, payload: CustomerProf
     link.customer_profile_id = payload.customer_profile_id
     db.commit()
     db.refresh(link)
-    return next(row for row in list_customers(db) if row["id"] == f"{source}:{external_id}")
+    return next(row for row in list_customers(request, db) if row["id"] == f"{source}:{external_id}")
 
 
 @app.get("/customer-monitoring", response_model=list[CustomerMonitoringRead], tags=["Clientes"])
-def customer_monitoring(db: Session = Depends(get_db)):
+def customer_monitoring(request: Request, db: Session = Depends(get_db)):
     rows = []
-    for customer in list_customers(db):
+    for customer in list_customers(request, db):
         source, _, external_id = customer["id"].partition(":")
         rows.append(
             customer_monitoring_row(
@@ -1431,9 +1853,9 @@ def customer_monitoring(db: Session = Depends(get_db)):
 
 
 @app.post("/customer-monitoring/{source}/{external_id}/apply-suggested-profile", response_model=CustomerRead, tags=["Clientes"])
-def apply_suggested_customer_profile(source: str, external_id: str, db: Session = Depends(get_db)):
+def apply_suggested_customer_profile(source: str, external_id: str, request: Request, db: Session = Depends(get_db)):
     customer_id = f"{source}:{external_id}"
-    customer = next((row for row in list_customers(db) if row["id"] == customer_id), None)
+    customer = next((row for row in list_customers(request, db) if row["id"] == customer_id), None)
     if not customer:
         raise HTTPException(status_code=404, detail="Cliente nao encontrado")
     suggestion = customer_monitoring_row(
@@ -1450,26 +1872,37 @@ def apply_suggested_customer_profile(source: str, external_id: str, db: Session 
         source,
         external_id,
         CustomerProfileAssign(customer_profile_id=suggestion["suggested_profile_id"]),
+        request,
         db,
     )
 
 
 @app.get("/product-groups", response_model=list[ProductGroupRead], tags=["Produtos"])
-def list_product_groups(db: Session = Depends(get_db)):
-    return db.scalars(select(ProductGroup).order_by(ProductGroup.code.asc(), ProductGroup.name.asc())).all()
+def list_product_groups(request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
+    items = db.scalars(
+        select(ProductGroup)
+        .where(text("EXISTS (SELECT 1 FROM control_catalog_companies cc WHERE cc.company_id = :company_id AND cc.catalog_key = 'sf_product_groups' AND cc.record_id = CAST(sf_product_groups.id AS VARCHAR) AND cc.active = TRUE)"))
+        .params(company_id=company_id)
+        .order_by(ProductGroup.code.asc(), ProductGroup.name.asc())
+    ).all()
+    return [group_to_read(db, item) for item in items]
 
 
 @app.post("/product-groups", response_model=ProductGroupRead, status_code=status.HTTP_201_CREATED, tags=["Produtos"])
-def create_product_group(payload: ProductGroupCreate, db: Session = Depends(get_db)):
+def create_product_group(payload: ProductGroupCreate, request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
     code = normalize_code(payload.code)
     exists = db.scalar(select(ProductGroup).where(ProductGroup.code == code))
     if exists:
         raise HTTPException(status_code=400, detail="Codigo do grupo de produto ja cadastrado")
     item = ProductGroup(code=code, name=payload.name.strip(), description=payload.description, active=payload.active)
     db.add(item)
+    db.flush()
+    ensure_catalog_company(db, company_id, "sf_product_groups", item.id)
     db.commit()
     db.refresh(item)
-    return item
+    return group_to_read(db, item)
 
 
 @app.put("/product-groups/{group_id}", response_model=ProductGroupRead, tags=["Produtos"])
@@ -1487,7 +1920,18 @@ def update_product_group(group_id: int, payload: ProductGroupUpdate, db: Session
     item.active = payload.active
     db.commit()
     db.refresh(item)
-    return item
+    return group_to_read(db, item)
+
+
+@app.put("/product-groups/{group_id}/companies", response_model=ProductGroupRead, tags=["Produtos"])
+def update_product_group_companies(group_id: int, payload: CompanyLinkUpdate, db: Session = Depends(get_db)):
+    item = db.get(ProductGroup, group_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Grupo de produto nao encontrado")
+    replace_catalog_companies(db, "sf_product_groups", item.id, payload.company_ids)
+    db.commit()
+    db.refresh(item)
+    return group_to_read(db, item)
 
 
 @app.delete("/product-groups/{group_id}", tags=["Produtos"])
@@ -1506,18 +1950,27 @@ def delete_product_group(group_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/product-classes", response_model=list[ProductClassRead], tags=["Produtos"])
-def list_product_classes(db: Session = Depends(get_db)):
-    items = db.scalars(select(ProductClass).order_by(ProductClass.code.asc(), ProductClass.name.asc())).all()
+def list_product_classes(request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
+    items = db.scalars(
+        select(ProductClass)
+        .where(text("EXISTS (SELECT 1 FROM control_catalog_companies cc WHERE cc.company_id = :company_id AND cc.catalog_key = 'sf_product_classes' AND cc.record_id = CAST(sf_product_classes.id AS VARCHAR) AND cc.active = TRUE)"))
+        .params(company_id=company_id)
+        .order_by(ProductClass.code.asc(), ProductClass.name.asc())
+    ).all()
     return [class_to_read(db, item) for item in items]
 
 
 @app.post("/product-classes", response_model=ProductClassRead, status_code=status.HTTP_201_CREATED, tags=["Produtos"])
-def create_product_class(payload: ProductClassCreate, db: Session = Depends(get_db)):
+def create_product_class(payload: ProductClassCreate, request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
     code = normalize_code(payload.code)
     exists = db.scalar(select(ProductClass).where(ProductClass.code == code))
     if exists:
         raise HTTPException(status_code=400, detail="Codigo da classe de produto ja cadastrado")
     get_group_or_404(db, payload.product_group_id)
+    if payload.product_group_id and not catalog_available_for_company(db, company_id, "sf_product_groups", payload.product_group_id):
+        raise HTTPException(status_code=400, detail="Grupo nao liberado para a empresa ativa")
     item = ProductClass(
         product_group_id=payload.product_group_id,
         code=code,
@@ -1526,13 +1979,16 @@ def create_product_class(payload: ProductClassCreate, db: Session = Depends(get_
         active=payload.active,
     )
     db.add(item)
+    db.flush()
+    ensure_catalog_company(db, company_id, "sf_product_classes", item.id)
     db.commit()
     db.refresh(item)
     return class_to_read(db, item)
 
 
 @app.put("/product-classes/{class_id}", response_model=ProductClassRead, tags=["Produtos"])
-def update_product_class(class_id: int, payload: ProductClassUpdate, db: Session = Depends(get_db)):
+def update_product_class(class_id: int, payload: ProductClassUpdate, request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
     item = db.get(ProductClass, class_id)
     if not item:
         raise HTTPException(status_code=404, detail="Classe de produto nao encontrada")
@@ -1541,11 +1997,24 @@ def update_product_class(class_id: int, payload: ProductClassUpdate, db: Session
     if exists:
         raise HTTPException(status_code=400, detail="Codigo da classe de produto ja cadastrado")
     get_group_or_404(db, payload.product_group_id)
+    if payload.product_group_id and not catalog_available_for_company(db, company_id, "sf_product_groups", payload.product_group_id):
+        raise HTTPException(status_code=400, detail="Grupo nao liberado para a empresa ativa")
     item.product_group_id = payload.product_group_id
     item.code = code
     item.name = payload.name.strip()
     item.description = payload.description
     item.active = payload.active
+    db.commit()
+    db.refresh(item)
+    return class_to_read(db, item)
+
+
+@app.put("/product-classes/{class_id}/companies", response_model=ProductClassRead, tags=["Produtos"])
+def update_product_class_companies(class_id: int, payload: CompanyLinkUpdate, db: Session = Depends(get_db)):
+    item = db.get(ProductClass, class_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Classe de produto nao encontrada")
+    replace_catalog_companies(db, "sf_product_classes", item.id, payload.company_ids)
     db.commit()
     db.refresh(item)
     return class_to_read(db, item)
@@ -1565,13 +2034,31 @@ def delete_product_class(class_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/products", response_model=list[ProductRead], tags=["Produtos"])
-def list_products(db: Session = Depends(get_db)):
-    items = db.scalars(select(Product).order_by(Product.sku.asc(), Product.name.asc())).all()
+def list_products(request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
+    items = db.scalars(
+        select(Product)
+        .where(text("EXISTS (SELECT 1 FROM control_product_companies pc WHERE pc.company_id = :company_id AND pc.product_source = 'easysales' AND pc.product_external_id = CAST(sf_products.id AS VARCHAR) AND pc.active = TRUE)"))
+        .params(company_id=company_id)
+        .order_by(Product.sku.asc(), Product.name.asc())
+    ).all()
     return [product_to_read(db, item) for item in items]
 
 
+@app.put("/products/{product_id}/companies", response_model=ProductRead, tags=["Produtos"])
+def update_product_companies(product_id: int, payload: CompanyLinkUpdate, db: Session = Depends(get_db)):
+    item = db.get(Product, product_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Produto nao encontrado")
+    replace_product_companies(db, item.id, payload.company_ids, item.default_warehouse_id)
+    db.commit()
+    db.refresh(item)
+    return product_to_read(db, item)
+
+
 @app.post("/products", response_model=ProductRead, status_code=status.HTTP_201_CREATED, tags=["Produtos"])
-def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
+def create_product(payload: ProductCreate, request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
     sku = normalize_code(payload.sku, "SKU")
     exists = db.scalar(select(Product).where(Product.sku == sku))
     if exists:
@@ -1598,6 +2085,8 @@ def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
         active=payload.active,
     )
     db.add(item)
+    db.flush()
+    ensure_product_company(db, company_id, item.id, warehouse["id"] if warehouse else None)
     db.commit()
     db.refresh(item)
     return product_to_read(db, item)
@@ -1695,7 +2184,8 @@ def update_product_lot_config(product_id: int, payload: ProductLotConfigUpdate, 
 
 
 @app.get("/stock-balances", response_model=list[StockBalanceRead], tags=["Produtos"])
-def list_stock_balances(product_external_id: str | None = None, db: Session = Depends(get_db)):
+def list_stock_balances(request: Request, product_external_id: str | None = None, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
     try:
         rows = db.execute(
             text(
@@ -1713,14 +2203,15 @@ def list_stock_balances(product_external_id: str | None = None, db: Session = De
                     COALESCE(SUM(bl.quantity), 0) AS balance_quantity
                 FROM flow_balance_ledger bl
                 JOIN flow_warehouses w ON w.id = bl.warehouse_id
-                WHERE (:product_external_id IS NULL OR bl.product_external_id = :product_external_id)
+                WHERE bl.company_id = :company_id
+                  AND (:product_external_id IS NULL OR bl.product_external_id = :product_external_id)
                 GROUP BY
                     bl.warehouse_id, w.name, bl.balance_type_id, bl.balance_code, bl.balance_name,
                     bl.product_source, bl.product_external_id, bl.product_sku, bl.product_name
                 ORDER BY w.name ASC, bl.balance_code ASC, bl.product_sku ASC
                 """
             ),
-            {"product_external_id": product_external_id},
+            {"product_external_id": product_external_id, "company_id": company_id},
         ).mappings().all()
         return rows
     except SQLAlchemyError:
@@ -1729,7 +2220,8 @@ def list_stock_balances(product_external_id: str | None = None, db: Session = De
 
 
 @app.get("/stock-movements", response_model=list[StockMovementRead], tags=["Produtos"])
-def list_stock_movements(product_external_id: str | None = None, db: Session = Depends(get_db)):
+def list_stock_movements(request: Request, product_external_id: str | None = None, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
     try:
         rows = db.execute(
             text(
@@ -1758,11 +2250,12 @@ def list_stock_movements(product_external_id: str | None = None, db: Session = D
                 LEFT JOIN flow_operation_types ot ON ot.id = COALESCE(d.operation_type_id, m.operation_type_id)
                 LEFT JOIN sf_products p ON CAST(p.id AS VARCHAR) = m.product_external_id
                 JOIN flow_warehouses w ON w.id = m.warehouse_id
-                WHERE (:product_external_id IS NULL OR m.product_external_id = :product_external_id)
+                WHERE COALESCE(d.company_id, m.company_id) = :company_id
+                  AND (:product_external_id IS NULL OR m.product_external_id = :product_external_id)
                 ORDER BY m.id DESC
                 """
             ),
-            {"product_external_id": product_external_id},
+            {"product_external_id": product_external_id, "company_id": company_id},
         ).mappings().all()
         return rows
     except SQLAlchemyError:
@@ -1771,12 +2264,20 @@ def list_stock_movements(product_external_id: str | None = None, db: Session = D
 
 
 @app.get("/price-tables", response_model=list[PriceTableRead], tags=["Tabelas de preco"])
-def list_price_tables(db: Session = Depends(get_db)):
-    return db.scalars(select(PriceTable).order_by(PriceTable.code.asc(), PriceTable.name.asc())).all()
+def list_price_tables(request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
+    items = db.scalars(
+        select(PriceTable)
+        .where(text("EXISTS (SELECT 1 FROM control_catalog_companies cc WHERE cc.company_id = :company_id AND cc.catalog_key = 'sf_price_tables' AND cc.record_id = CAST(sf_price_tables.id AS VARCHAR) AND cc.active = TRUE)"))
+        .params(company_id=company_id)
+        .order_by(PriceTable.code.asc(), PriceTable.name.asc())
+    ).all()
+    return [price_table_to_read(db, item) for item in items]
 
 
 @app.post("/price-tables", response_model=PriceTableRead, status_code=status.HTTP_201_CREATED, tags=["Tabelas de preco"])
-def create_price_table(payload: PriceTableCreate, db: Session = Depends(get_db)):
+def create_price_table(payload: PriceTableCreate, request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
     code = normalize_code(payload.code)
     exists = db.scalar(select(PriceTable).where(PriceTable.code == code))
     if exists:
@@ -1790,9 +2291,11 @@ def create_price_table(payload: PriceTableCreate, db: Session = Depends(get_db))
         active=payload.active,
     )
     db.add(item)
+    db.flush()
+    ensure_catalog_company(db, company_id, "sf_price_tables", item.id)
     db.commit()
     db.refresh(item)
-    return item
+    return price_table_to_read(db, item)
 
 
 @app.put("/price-tables/{price_table_id}", response_model=PriceTableRead, tags=["Tabelas de preco"])
@@ -1810,7 +2313,16 @@ def update_price_table(price_table_id: int, payload: PriceTableUpdate, db: Sessi
     item.active = payload.active
     db.commit()
     db.refresh(item)
-    return item
+    return price_table_to_read(db, item)
+
+
+@app.put("/price-tables/{price_table_id}/companies", response_model=PriceTableRead, tags=["Tabelas de preco"])
+def update_price_table_companies(price_table_id: int, payload: CompanyLinkUpdate, db: Session = Depends(get_db)):
+    item = get_price_table_or_404(db, price_table_id)
+    replace_catalog_companies(db, "sf_price_tables", item.id, payload.company_ids)
+    db.commit()
+    db.refresh(item)
+    return price_table_to_read(db, item)
 
 
 @app.delete("/price-tables/{price_table_id}", tags=["Tabelas de preco"])
@@ -2018,26 +2530,29 @@ def price_preview(price_table_id: int, product_id: int, payment_due_date: date, 
 
 
 @app.get("/orders", response_model=list[SalesOrderRead], tags=["Pedidos"])
-def list_orders(db: Session = Depends(get_db)):
-    orders = db.scalars(select(SalesOrder).order_by(SalesOrder.id.desc())).all()
+def list_orders(request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
+    orders = db.scalars(select(SalesOrder).where(SalesOrder.company_id == company_id).order_by(SalesOrder.id.desc())).all()
     return [order_to_read(db, order) for order in orders]
 
 
 @app.get("/orders/{order_id}", response_model=SalesOrderRead, tags=["Pedidos"])
-def get_order(order_id: int, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def get_order(order_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     return order_to_read(db, order)
 
 
 @app.post("/orders", response_model=SalesOrderRead, status_code=status.HTTP_201_CREATED, tags=["Pedidos"])
-def create_order(payload: SalesOrderCreate, db: Session = Depends(get_db)):
+def create_order(payload: SalesOrderCreate, request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
     table = get_price_table_or_404(db, payload.price_table_id)
     if not table.active:
         raise HTTPException(status_code=400, detail="Tabela de preco inativa")
     customer = resolve_customer(db, payload.customer_id)
+    if not person_available_for_company(db, company_id, customer["source"], customer["external_id"]):
+        raise HTTPException(status_code=400, detail="Cliente nao vinculado a empresa ativa")
     order = SalesOrder(
+        company_id=company_id,
         order_number=next_order_number(db),
         order_type=normalize_order_type(payload.order_type),
         customer_source=customer["source"],
@@ -2066,10 +2581,8 @@ def create_order(payload: SalesOrderCreate, db: Session = Depends(get_db)):
 
 
 @app.post("/orders/{order_id}/items", response_model=SalesOrderRead, status_code=status.HTTP_201_CREATED, tags=["Pedidos"])
-def create_order_item(order_id: int, payload: SalesOrderItemCreate, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def create_order_item(order_id: int, payload: SalesOrderItemCreate, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     was_submitted = order.approval_stage != "draft"
     table = get_price_table_or_404(db, order.price_table_id)
     build_order_items(db, order, table, [payload], order.payment_due_date)
@@ -2081,10 +2594,8 @@ def create_order_item(order_id: int, payload: SalesOrderItemCreate, db: Session 
 
 
 @app.put("/orders/{order_id}/items/{item_id}", response_model=SalesOrderRead, tags=["Pedidos"])
-def update_order_item(order_id: int, item_id: int, payload: SalesOrderItemCreate, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def update_order_item(order_id: int, item_id: int, payload: SalesOrderItemCreate, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     item = db.get(SalesOrderItem, item_id)
     if not item or item.order_id != order.id:
         raise HTTPException(status_code=404, detail="Item do pedido nao encontrado")
@@ -2099,10 +2610,8 @@ def update_order_item(order_id: int, item_id: int, payload: SalesOrderItemCreate
 
 
 @app.delete("/orders/{order_id}/items/{item_id}", response_model=SalesOrderRead, tags=["Pedidos"])
-def delete_order_item(order_id: int, item_id: int, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def delete_order_item(order_id: int, item_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     item = db.get(SalesOrderItem, item_id)
     if not item or item.order_id != order.id:
         raise HTTPException(status_code=404, detail="Item do pedido nao encontrado")
@@ -2118,15 +2627,16 @@ def delete_order_item(order_id: int, item_id: int, db: Session = Depends(get_db)
 
 
 @app.put("/orders/{order_id}", response_model=SalesOrderRead, tags=["Pedidos"])
-def update_order(order_id: int, payload: SalesOrderUpdate, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def update_order(order_id: int, payload: SalesOrderUpdate, request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
+    order = order_for_company_or_404(db, order_id, company_id)
     was_submitted = order.approval_stage != "draft"
     table = get_price_table_or_404(db, payload.price_table_id)
     if not table.active:
         raise HTTPException(status_code=400, detail="Tabela de preco inativa")
     customer = resolve_customer(db, payload.customer_id)
+    if not person_available_for_company(db, company_id, customer["source"], customer["external_id"]):
+        raise HTTPException(status_code=400, detail="Cliente nao vinculado a empresa ativa")
     existing_items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id).order_by(SalesOrderItem.id.asc())).all()
     has_linked_items = any(linked_quantity_for_order_item(db, item.id) > 0 for item in existing_items)
     order.customer_source = customer["source"]
@@ -2169,10 +2679,8 @@ def update_order(order_id: int, payload: SalesOrderUpdate, db: Session = Depends
 
 
 @app.post("/orders/{order_id}/payment-suggestions/generate", response_model=SalesOrderRead, tags=["Pedidos"])
-def generate_order_payment_suggestions(order_id: int, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def generate_order_payment_suggestions(order_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     was_submitted = order.approval_stage != "draft"
     if Decimal(str(order.total_amount or 0)) <= 0:
         raise HTTPException(status_code=400, detail="Pedido sem total para gerar sugestao de pagamento")
@@ -2180,6 +2688,7 @@ def generate_order_payment_suggestions(order_id: int, db: Session = Depends(get_
         db.delete(item)
     db.add(
         SalesOrderPayment(
+            company_id=order.company_id,
             order_id=order.id,
             payment_method="avista",
             due_date=order.payment_due_date,
@@ -2195,10 +2704,8 @@ def generate_order_payment_suggestions(order_id: int, db: Session = Depends(get_
 
 
 @app.put("/orders/{order_id}/payment-suggestions", response_model=SalesOrderRead, tags=["Pedidos"])
-def save_order_payment_suggestions(order_id: int, payload: list[SalesOrderPaymentCreate], db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def save_order_payment_suggestions(order_id: int, payload: list[SalesOrderPaymentCreate], request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     was_submitted = order.approval_stage != "draft"
     validate_payment_suggestions(order, payload)
     for item in db.scalars(select(SalesOrderPayment).where(SalesOrderPayment.order_id == order.id)).all():
@@ -2206,6 +2713,7 @@ def save_order_payment_suggestions(order_id: int, payload: list[SalesOrderPaymen
     for item in payload:
         db.add(
             SalesOrderPayment(
+                company_id=order.company_id,
                 order_id=order.id,
                 payment_method=item.payment_method,
                 due_date=item.due_date,
@@ -2221,10 +2729,8 @@ def save_order_payment_suggestions(order_id: int, payload: list[SalesOrderPaymen
 
 
 @app.post("/orders/{order_id}/submit", response_model=SalesOrderRead, tags=["Pedidos"])
-def submit_order(order_id: int, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def submit_order(order_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     recalculate_order_totals(db, order)
     if Decimal(str(order.total_amount or 0)) <= 0:
         raise HTTPException(status_code=400, detail="Pedido sem itens ou total zerado")
@@ -2238,10 +2744,8 @@ def submit_order(order_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/orders/{order_id}/approve-financial", response_model=SalesOrderRead, tags=["Pedidos"])
-def approve_order_financial(order_id: int, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def approve_order_financial(order_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     recalculate_order_totals(db, order)
     allowed, notes = evaluate_financial_approval(db, order)
     order.financial_approved_at = datetime.utcnow()
@@ -2271,10 +2775,8 @@ def approve_order_financial(order_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/orders/{order_id}/approve-commercial", response_model=SalesOrderRead, tags=["Pedidos"])
-def approve_order_commercial(order_id: int, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def approve_order_commercial(order_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     if order.status not in {"pending_commercial", "financial_blocked"}:
         raise HTTPException(status_code=400, detail="Pedido precisa passar pela aprovacao financeira")
     pending = db.scalar(
@@ -2293,10 +2795,8 @@ def approve_order_commercial(order_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/orders/{order_id}/items/{item_id}/approve-commercial", response_model=SalesOrderRead, tags=["Pedidos"])
-def approve_order_item_commercial(order_id: int, item_id: int, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def approve_order_item_commercial(order_id: int, item_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     item = db.get(SalesOrderItem, item_id)
     if not item or item.order_id != order.id:
         raise HTTPException(status_code=404, detail="Item do pedido nao encontrado")
@@ -2311,10 +2811,8 @@ def approve_order_item_commercial(order_id: int, item_id: int, db: Session = Dep
 
 
 @app.post("/orders/{order_id}/items/{item_id}/cancel", response_model=SalesOrderRead, tags=["Pedidos"])
-def cancel_order_item(order_id: int, item_id: int, payload: SalesOrderItemCancel, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def cancel_order_item(order_id: int, item_id: int, payload: SalesOrderItemCancel, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     item = db.get(SalesOrderItem, item_id)
     if not item or item.order_id != order.id:
         raise HTTPException(status_code=404, detail="Item do pedido nao encontrado")
@@ -2338,10 +2836,8 @@ def cancel_order_item(order_id: int, item_id: int, payload: SalesOrderItemCancel
 
 
 @app.post("/orders/{order_id}/cancel", response_model=SalesOrderRead, tags=["Pedidos"])
-def cancel_order(order_id: int, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def cancel_order(order_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     for item in db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all():
         if linked_quantity_for_order_item(db, item.id) > 0:
             raise HTTPException(status_code=400, detail="Pedido com baixa vinculada no Flow nao pode ser cancelado")
@@ -2358,10 +2854,8 @@ def cancel_order(order_id: int, db: Session = Depends(get_db)):
 
 
 @app.post("/orders/{order_id}/reject", response_model=SalesOrderRead, tags=["Pedidos"])
-def reject_order(order_id: int, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def reject_order(order_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     order.status = "rejected"
     order.approval_stage = "rejected"
     order.approval_notes = "Pedido rejeitado."
@@ -2372,10 +2866,8 @@ def reject_order(order_id: int, db: Session = Depends(get_db)):
 
 
 @app.delete("/orders/{order_id}", tags=["Pedidos"])
-def delete_order(order_id: int, db: Session = Depends(get_db)):
-    order = db.get(SalesOrder, order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Pedido nao encontrado")
+def delete_order(order_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all()
     if any(linked_quantity_for_order_item(db, item.id) > 0 for item in items):
         raise HTTPException(status_code=400, detail="Pedido com baixa vinculada no Flow nao pode ser excluido")

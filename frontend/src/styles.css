@@ -183,6 +183,10 @@ select {
   gap: 10px;
 }
 
+.company-select {
+  width: min(280px, 36vw);
+}
+
 .topbar p,
 .panel-header p,
 .browser-header p {
@@ -875,6 +879,43 @@ th {
 
 .modal-detail {
   padding: 0 18px 18px;
+}
+
+.company-links {
+  display: grid;
+  gap: 10px;
+  padding: 18px;
+}
+
+.company-link-row {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  background: var(--panel-soft);
+}
+
+.company-link-row input {
+  width: auto;
+  min-height: auto;
+}
+
+.company-link-row strong,
+.company-link-row small {
+  display: block;
+}
+
+.company-link-row small {
+  color: var(--muted);
+}
+
+.modal-footer-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .inline-alert {

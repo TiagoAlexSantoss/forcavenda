@@ -21,6 +21,7 @@ class ProductGroupUpdate(ProductGroupBase):
 
 class ProductGroupRead(ProductGroupBase):
     id: int
+    company_ids: list[int] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -45,6 +46,7 @@ class ProductClassUpdate(ProductClassBase):
 class ProductClassRead(ProductClassBase):
     id: int
     product_group_name: str | None = None
+    company_ids: list[int] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -79,6 +81,7 @@ class ProductRead(ProductBase):
     default_warehouse_name: str | None = None
     controls_lot: bool = False
     lot_type: str = "none"
+    company_ids: list[int] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -136,6 +139,20 @@ class CustomerRead(BaseModel):
     city: str | None = None
     state_code: str | None = None
     active: bool = True
+    company_ids: list[int] = Field(default_factory=list)
+
+
+class CompanyRead(BaseModel):
+    id: int
+    code: str
+    name: str
+    company_kind: str = "matrix"
+    parent_company_id: int | None = None
+    active: bool = True
+
+
+class CompanyLinkUpdate(BaseModel):
+    company_ids: list[int] = Field(default_factory=list)
 
 
 class CustomerBase(BaseModel):
@@ -242,6 +259,7 @@ class PriceTableUpdate(PriceTableBase):
 
 class PriceTableRead(PriceTableBase):
     id: int
+    company_ids: list[int] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
@@ -337,6 +355,7 @@ class SalesOrderUpdate(SalesOrderCreate):
 
 class SalesOrderItemRead(BaseModel):
     id: int
+    company_id: int | None = None
     product_id: int
     product_sku: str
     product_name: str
@@ -376,6 +395,7 @@ class SalesOrderPaymentCreate(SalesOrderPaymentBase):
 
 class SalesOrderPaymentRead(SalesOrderPaymentBase):
     id: int
+    company_id: int | None = None
 
     class Config:
         from_attributes = True
@@ -393,6 +413,7 @@ class AuthorizationReasonRead(BaseModel):
 
 class SalesOrderRead(BaseModel):
     id: int
+    company_id: int | None = None
     order_number: str
     order_type: str = "sale"
     customer_source: str

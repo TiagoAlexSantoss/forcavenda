@@ -19,6 +19,48 @@ class ProductGroup(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class Company(Base):
+    __tablename__ = "control_companies"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    parent_company_id: Mapped[int | None] = mapped_column(ForeignKey("control_companies.id"), nullable=True, index=True)
+    code: Mapped[str] = mapped_column(String(40), unique=True, index=True, nullable=False)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    legal_name: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    document_number: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    company_kind: Mapped[str] = mapped_column(String(20), nullable=False, default="matrix")
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProductCompany(Base):
+    __tablename__ = "control_product_companies"
+    __table_args__ = (UniqueConstraint("product_source", "product_external_id", "company_id", name="uq_control_product_company"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("control_companies.id"), nullable=False, index=True)
+    product_source: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    product_external_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    default_warehouse_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PersonCompany(Base):
+    __tablename__ = "control_person_companies"
+    __table_args__ = (UniqueConstraint("person_source", "person_external_id", "company_id", name="uq_control_person_company"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("control_companies.id"), nullable=False, index=True)
+    person_source: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    person_external_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class ProductClass(Base):
     __tablename__ = "sf_product_classes"
 
@@ -144,6 +186,7 @@ class SalesOrder(Base):
     __tablename__ = "sf_sales_orders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("control_companies.id"), nullable=True, index=True)
     order_number: Mapped[str] = mapped_column(String(40), unique=True, index=True, nullable=False)
     order_type: Mapped[str] = mapped_column(String(20), nullable=False, default="sale")
     operation_type_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
@@ -175,6 +218,7 @@ class SalesOrderItem(Base):
     __tablename__ = "sf_sales_order_items"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("control_companies.id"), nullable=True, index=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("sf_sales_orders.id"), index=True, nullable=False)
     product_id: Mapped[int] = mapped_column(ForeignKey("sf_products.id"), nullable=False)
     product_sku: Mapped[str] = mapped_column(String(60), nullable=False)
@@ -204,6 +248,7 @@ class SalesOrderPayment(Base):
     __tablename__ = "sf_sales_order_payments"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("control_companies.id"), nullable=True, index=True)
     order_id: Mapped[int] = mapped_column(ForeignKey("sf_sales_orders.id"), index=True, nullable=False)
     payment_method: Mapped[str] = mapped_column(String(40), nullable=False, default="boleto")
     due_date: Mapped[date] = mapped_column(Date, nullable=False)
