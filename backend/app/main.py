@@ -110,6 +110,8 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS approval_stage VARCHAR(30) NOT NULL DEFAULT 'draft'"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS approval_notes VARCHAR(800)"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS order_type VARCHAR(20) NOT NULL DEFAULT 'sale'"))
+        connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS operation_type_id INTEGER"))
+        connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS operation_code VARCHAR(40)"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS delivery_date DATE"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS warehouse_id INTEGER"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS warehouse_name VARCHAR(160)"))
@@ -130,11 +132,26 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS commercial_status VARCHAR(30) NOT NULL DEFAULT 'approved'"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS commercial_reason VARCHAR(800)"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS cancellation_status VARCHAR(30) NOT NULL DEFAULT 'active'"))
+        connection.execute(text("ALTER TABLE flow_balance_ledger ALTER COLUMN stock_movement_id DROP NOT NULL"))
+        connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_system VARCHAR(40)"))
+        connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_document_kind VARCHAR(40)"))
+        connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_document_id VARCHAR(80)"))
+        connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_item_id VARCHAR(80)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_flow_balance_ledger_source_item ON flow_balance_ledger (source_system, source_document_kind, source_item_id)"))
+        connection.execute(text("UPDATE sf_sales_orders SET operation_code = 'PV' WHERE order_type = 'sale' AND (operation_code IS NULL OR operation_code = '')"))
+        connection.execute(text("UPDATE sf_sales_orders o SET operation_type_id = op.id FROM flow_operation_types op WHERE op.code = 'PV' AND o.order_type = 'sale' AND o.operation_type_id IS NULL"))
         connection.execute(text("UPDATE sf_sales_order_items SET negotiated_unit_price = corrected_unit_price WHERE negotiated_unit_price = 0"))
         connection.execute(text("UPDATE sf_sales_order_items SET min_unit_price = ROUND(corrected_unit_price * 0.95, 2) WHERE min_unit_price = 0"))
         connection.execute(text("UPDATE sf_sales_order_items SET max_unit_price = ROUND(corrected_unit_price * 1.05, 2) WHERE max_unit_price = 0"))
         connection.execute(text("UPDATE sf_sales_orders SET order_type = 'sale' WHERE order_type IS NULL OR order_type = ''"))
     seed_customer_profiles()
+    db = next(get_db())
+    try:
+        for order in db.scalars(select(SalesOrder).where(SalesOrder.approval_stage != "draft")).all():
+            sync_order_balance_ledger(db, order, strict=False)
+        db.commit()
+    finally:
+        db.close()
 
 
 def normalize_code(value: str, field_name: str = "Codigo") -> str:
@@ -470,6 +487,119 @@ def commercial_reason_for_price(unit_price: Decimal, min_price: Decimal, max_pri
 def effective_quantity(item: SalesOrderItem) -> Decimal:
     value = Decimal(str(item.quantity or 0)) - Decimal(str(item.cancelled_quantity or 0))
     return max(value, Decimal("0"))
+
+
+def order_balance_ledger_filter(order: SalesOrder):
+    return {
+        "source_system": "easysales",
+        "source_document_kind": "sales_order",
+        "source_document_id": str(order.id),
+    }
+
+
+def clear_order_balance_ledger(db: Session, order: SalesOrder):
+    db.execute(
+        text(
+            """
+            DELETE FROM flow_balance_ledger
+            WHERE source_system = :source_system
+              AND source_document_kind = :source_document_kind
+              AND source_document_id = :source_document_id
+            """
+        ),
+        order_balance_ledger_filter(order),
+    )
+
+
+def sales_order_operation(db: Session, order: SalesOrder):
+    operation = None
+    if order.operation_type_id:
+        operation = db.execute(
+            text("SELECT id, code, name, movement_direction FROM flow_operation_types WHERE id = :id AND active = TRUE"),
+            {"id": order.operation_type_id},
+        ).mappings().first()
+    if not operation:
+        operation = db.execute(
+            text("SELECT id, code, name, movement_direction FROM flow_operation_types WHERE code = 'PV' AND active = TRUE"),
+        ).mappings().first()
+    if operation:
+        order.operation_type_id = operation["id"]
+        order.operation_code = operation["code"]
+    return operation
+
+
+def balance_effect_quantity(operation, effect_direction: str, quantity: Decimal) -> Decimal:
+    if effect_direction == "increase":
+        return quantity
+    if effect_direction == "decrease":
+        return -quantity
+    return -quantity if operation["movement_direction"] == "exit" else quantity
+
+
+def sync_order_balance_ledger(db: Session, order: SalesOrder, strict: bool = True):
+    clear_order_balance_ledger(db, order)
+    if order.order_type != "sale" or order.status != "approved" or order.approval_stage != "approved":
+        return
+    operation = sales_order_operation(db, order)
+    if not operation:
+        raise HTTPException(status_code=400, detail="Operacao PV nao configurada no EasyFlow")
+    effects = db.execute(
+        text(
+            """
+            SELECT e.effect_direction, b.id AS balance_type_id, b.code AS balance_code, b.name AS balance_name
+            FROM flow_operation_balance_effects e
+            JOIN flow_balance_types b ON b.id = e.balance_type_id
+            WHERE e.operation_type_id = :operation_type_id
+              AND e.active = TRUE
+              AND b.active = TRUE
+            """
+        ),
+        {"operation_type_id": operation["id"]},
+    ).mappings().all()
+    if not effects:
+        return
+    items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all()
+    for item in items:
+        quantity = effective_quantity(item)
+        if quantity <= 0:
+            continue
+        warehouse_id = item.warehouse_id
+        if not warehouse_id:
+            product = db.get(Product, item.product_id)
+            warehouse_id = product.default_warehouse_id if product else None
+        if not warehouse_id:
+            if strict:
+                raise HTTPException(status_code=400, detail=f"Item {item.product_sku} sem local de estoque para reservar saldo")
+            continue
+        for effect in effects:
+            db.execute(
+                text(
+                    """
+                    INSERT INTO flow_balance_ledger (
+                        stock_movement_id, source_system, source_document_kind, source_document_id, source_item_id,
+                        warehouse_id, balance_type_id, balance_code, balance_name,
+                        product_source, product_external_id, product_sku, product_name, quantity, created_at
+                    )
+                    VALUES (
+                        NULL, 'easysales', 'sales_order', :order_id, :item_id,
+                        :warehouse_id, :balance_type_id, :balance_code, :balance_name,
+                        'easysales', :product_id, :product_sku, :product_name, :quantity, CURRENT_TIMESTAMP
+                    )
+                    """
+                ),
+                {
+                    "order_id": str(order.id),
+                    "item_id": str(item.id),
+                    "warehouse_id": warehouse_id,
+                    "balance_type_id": effect["balance_type_id"],
+                    "balance_code": effect["balance_code"],
+                    "balance_name": effect["balance_name"],
+                    "product_id": str(item.product_id),
+                    "product_sku": item.product_sku,
+                    "product_name": item.product_name,
+                    "quantity": balance_effect_quantity(operation, effect["effect_direction"], quantity),
+                },
+            )
 
 
 def linked_quantity_for_order_item(db: Session, item_id: int) -> Decimal:
@@ -910,18 +1040,21 @@ def refresh_order_approval_stage(db: Session, order: SalesOrder):
         order.status = "cancelled"
         order.approval_stage = "cancelled"
         order.approval_notes = "Pedido cancelado integralmente pelos itens."
+        sync_order_balance_ledger(db, order)
         return
     pending = [item for item in active_items if item.commercial_status == "pending"]
     if pending:
         order.status = "pending_commercial"
         order.approval_stage = "commercial"
         order.approval_notes = "Pedido possui item(ns) que precisam de autorizacao comercial."
+        sync_order_balance_ledger(db, order)
         return
     if order.status in {"pending_commercial", "financial_blocked"}:
         order.status = "approved"
         order.approval_stage = "approved"
         order.commercial_approved_at = datetime.utcnow()
         order.approval_notes = "Itens aprovados comercialmente."
+    sync_order_balance_ledger(db, order)
 
 
 def apply_order_approval_flow(db: Session, order: SalesOrder):
@@ -938,6 +1071,7 @@ def apply_order_approval_flow(db: Session, order: SalesOrder):
         order.financial_approved_at = None
         order.commercial_approved_at = None
         order.approval_notes = " ".join(notes)
+        sync_order_balance_ledger(db, order)
         return
     order.financial_approved_at = datetime.utcnow()
     pending_commercial = db.scalar(
@@ -952,11 +1086,13 @@ def apply_order_approval_flow(db: Session, order: SalesOrder):
         order.approval_stage = "commercial"
         order.commercial_approved_at = None
         order.approval_notes = "Pedido aprovado financeiramente. Existem item(ns) pendentes de autorizacao comercial."
+        sync_order_balance_ledger(db, order)
         return
     order.status = "approved"
     order.approval_stage = "approved"
     order.commercial_approved_at = datetime.utcnow()
     order.approval_notes = "Pedido aprovado automaticamente sem pendencias financeiras ou comerciais."
+    sync_order_balance_ledger(db, order)
 
 
 def revalidate_order_if_submitted(db: Session, order: SalesOrder, was_submitted: bool):
@@ -1602,22 +1738,25 @@ def list_stock_movements(product_external_id: str | None = None, db: Session = D
                     m.id,
                     m.warehouse_id,
                     w.name AS warehouse_name,
-                    m.operation_code,
-                    m.operation_name,
-                    m.document_type_code,
-                    m.document_number,
-                    m.document_series,
-                    m.issue_date,
-                    m.movement_date,
+                    COALESCE(d.operation_code, m.operation_code) AS operation_code,
+                    ot.name AS operation_name,
+                    COALESCE(d.document_type_code, m.document_type_code) AS document_type_code,
+                    COALESCE(d.document_number, m.document_number) AS document_number,
+                    COALESCE(d.document_series, m.document_series) AS document_series,
+                    COALESCE(d.issue_date, m.issue_date) AS issue_date,
+                    COALESCE(d.movement_date, m.movement_date) AS movement_date,
                     m.product_source,
                     m.product_external_id,
-                    m.product_sku,
-                    m.product_name,
+                    p.sku AS product_sku,
+                    p.name AS product_name,
                     m.movement_type,
                     m.quantity,
                     m.unit_price,
                     m.created_at
                 FROM flow_stock_movements m
+                LEFT JOIN flow_movement_documents d ON d.id = m.movement_document_id
+                LEFT JOIN flow_operation_types ot ON ot.id = COALESCE(d.operation_type_id, m.operation_type_id)
+                LEFT JOIN sf_products p ON CAST(p.id AS VARCHAR) = m.product_external_id
                 JOIN flow_warehouses w ON w.id = m.warehouse_id
                 WHERE (:product_external_id IS NULL OR m.product_external_id = :product_external_id)
                 ORDER BY m.id DESC
@@ -1918,6 +2057,7 @@ def create_order(payload: SalesOrderCreate, db: Session = Depends(get_db)):
     )
     db.add(order)
     db.flush()
+    sales_order_operation(db, order)
     build_order_items(db, order, table, payload.items, payload.payment_due_date)
     recalculate_order_totals(db, order)
     db.commit()
@@ -2124,6 +2264,7 @@ def approve_order_financial(order_id: int, db: Session = Depends(get_db)):
         order.commercial_approved_at = datetime.utcnow()
         if allowed:
             order.approval_notes = "Pedido aprovado automaticamente na etapa comercial."
+    sync_order_balance_ledger(db, order)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -2145,6 +2286,7 @@ def approve_order_commercial(order_id: int, db: Session = Depends(get_db)):
     if pending:
         raise HTTPException(status_code=400, detail="A aprovacao comercial agora deve ser feita item a item")
     refresh_order_approval_stage(db, order)
+    sync_order_balance_ledger(db, order)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -2162,6 +2304,7 @@ def approve_order_item_commercial(order_id: int, item_id: int, db: Session = Dep
     item.commercial_reason = "Item autorizado comercialmente."
     recalculate_order_totals(db, order)
     refresh_order_approval_stage(db, order)
+    sync_order_balance_ledger(db, order)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -2208,6 +2351,7 @@ def cancel_order(order_id: int, db: Session = Depends(get_db)):
     order.status = "cancelled"
     order.approval_stage = "cancelled"
     order.approval_notes = "Pedido cancelado."
+    sync_order_balance_ledger(db, order)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -2221,6 +2365,7 @@ def reject_order(order_id: int, db: Session = Depends(get_db)):
     order.status = "rejected"
     order.approval_stage = "rejected"
     order.approval_notes = "Pedido rejeitado."
+    sync_order_balance_ledger(db, order)
     db.commit()
     db.refresh(order)
     return order_to_read(db, order)
@@ -2231,7 +2376,14 @@ def delete_order(order_id: int, db: Session = Depends(get_db)):
     order = db.get(SalesOrder, order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Pedido nao encontrado")
-    for item in db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all():
+    items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id)).all()
+    if any(linked_quantity_for_order_item(db, item.id) > 0 for item in items):
+        raise HTTPException(status_code=400, detail="Pedido com baixa vinculada no Flow nao pode ser excluido")
+    clear_order_balance_ledger(db, order)
+    for payment in db.scalars(select(SalesOrderPayment).where(SalesOrderPayment.order_id == order.id)).all():
+        db.delete(payment)
+    db.flush()
+    for item in items:
         db.delete(item)
     db.flush()
     db.delete(order)

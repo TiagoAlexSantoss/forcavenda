@@ -146,6 +146,8 @@ class SalesOrder(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     order_number: Mapped[str] = mapped_column(String(40), unique=True, index=True, nullable=False)
     order_type: Mapped[str] = mapped_column(String(20), nullable=False, default="sale")
+    operation_type_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    operation_code: Mapped[str | None] = mapped_column(String(40), nullable=True)
     customer_source: Mapped[str] = mapped_column(String(40), nullable=False)
     customer_external_id: Mapped[str] = mapped_column(String(80), nullable=False)
     customer_name: Mapped[str] = mapped_column(String(180), nullable=False)
