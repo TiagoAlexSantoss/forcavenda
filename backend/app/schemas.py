@@ -60,6 +60,7 @@ class ProductBase(BaseModel):
     unit: str = "UN"
     purchase_price: Decimal = Decimal("0.00")
     cost_price: Decimal = Decimal("0.00")
+    suggested_margin_percent: Decimal = Decimal("0.00")
     sale_price: Decimal = Decimal("0.00")
     default_warehouse_id: int | None = None
     description: str | None = None

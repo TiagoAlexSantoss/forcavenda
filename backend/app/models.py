@@ -85,6 +85,7 @@ class Product(Base):
     unit: Mapped[str] = mapped_column(String(20), nullable=False, default="UN")
     purchase_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     cost_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    suggested_margin_percent: Mapped[Decimal] = mapped_column(Numeric(8, 2), nullable=False, default=0)
     sale_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     default_warehouse_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     default_warehouse_name: Mapped[str | None] = mapped_column(String(160), nullable=True)

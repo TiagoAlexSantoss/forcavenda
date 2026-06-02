@@ -116,6 +116,7 @@ async def startup():
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_control_catalog_companies_company_record ON control_catalog_companies (company_id, catalog_key, record_id)"))
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS purchase_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS cost_price NUMERIC(14, 2) NOT NULL DEFAULT 0"))
+        connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS suggested_margin_percent NUMERIC(8, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS default_warehouse_id INTEGER"))
         connection.execute(text("ALTER TABLE sf_products ADD COLUMN IF NOT EXISTS default_warehouse_name VARCHAR(160)"))
         connection.execute(text("CREATE TABLE IF NOT EXISTS flow_product_lot_configs (id SERIAL PRIMARY KEY, product_source VARCHAR(40) NOT NULL, product_external_id VARCHAR(80) NOT NULL, controls_lot BOOLEAN NOT NULL DEFAULT FALSE, lot_type VARCHAR(30) NOT NULL DEFAULT 'none', updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"))
@@ -570,6 +571,7 @@ def product_to_read(db: Session, item: Product) -> dict:
         "unit": item.unit,
         "purchase_price": item.purchase_price,
         "cost_price": item.cost_price,
+        "suggested_margin_percent": item.suggested_margin_percent,
         "sale_price": item.sale_price,
         "default_warehouse_id": item.default_warehouse_id,
         "default_warehouse_name": item.default_warehouse_name,
@@ -579,6 +581,12 @@ def product_to_read(db: Session, item: Product) -> dict:
         "active": item.active,
         "company_ids": company_ids_for_product(db, item.id),
     }
+
+
+def suggested_sale_price(cost_price: Decimal, margin_percent: Decimal) -> Decimal:
+    cost = Decimal(str(cost_price or 0))
+    margin = Decimal(str(margin_percent or 0))
+    return cost * (Decimal("1") + (margin / Decimal("100")))
 
 
 def product_lot_config(db: Session, product_id: str) -> dict | None:
@@ -2063,10 +2071,8 @@ def create_product(payload: ProductCreate, request: Request, db: Session = Depen
     exists = db.scalar(select(Product).where(Product.sku == sku))
     if exists:
         raise HTTPException(status_code=400, detail="SKU ja cadastrado")
-    if Decimal(str(payload.sale_price)) < 0:
-        raise HTTPException(status_code=400, detail="Preco de venda nao pode ser negativo")
-    if Decimal(str(payload.purchase_price)) < 0 or Decimal(str(payload.cost_price)) < 0:
-        raise HTTPException(status_code=400, detail="Preco de compra e custo nao podem ser negativos")
+    if Decimal(str(payload.suggested_margin_percent)) < 0:
+        raise HTTPException(status_code=400, detail="Margem sugerida nao pode ser negativa")
     get_group_or_404(db, payload.product_group_id)
     get_class_or_404(db, payload.product_class_id)
     warehouse = resolve_warehouse(db, payload.default_warehouse_id)
@@ -2076,9 +2082,10 @@ def create_product(payload: ProductCreate, request: Request, db: Session = Depen
         sku=sku,
         name=payload.name.strip(),
         unit=payload.unit.strip().upper() or "UN",
-        purchase_price=payload.purchase_price,
-        cost_price=payload.cost_price,
-        sale_price=payload.sale_price,
+        purchase_price=Decimal("0.00"),
+        cost_price=Decimal("0.00"),
+        suggested_margin_percent=payload.suggested_margin_percent,
+        sale_price=Decimal("0.00"),
         default_warehouse_id=warehouse["id"] if warehouse else None,
         default_warehouse_name=warehouse["name"] if warehouse else None,
         description=payload.description,
@@ -2101,10 +2108,8 @@ def update_product(product_id: int, payload: ProductUpdate, db: Session = Depend
     exists = db.scalar(select(Product).where(Product.sku == sku, Product.id != product_id))
     if exists:
         raise HTTPException(status_code=400, detail="SKU ja cadastrado")
-    if Decimal(str(payload.sale_price)) < 0:
-        raise HTTPException(status_code=400, detail="Preco de venda nao pode ser negativo")
-    if Decimal(str(payload.purchase_price)) < 0 or Decimal(str(payload.cost_price)) < 0:
-        raise HTTPException(status_code=400, detail="Preco de compra e custo nao podem ser negativos")
+    if Decimal(str(payload.suggested_margin_percent)) < 0:
+        raise HTTPException(status_code=400, detail="Margem sugerida nao pode ser negativa")
     get_group_or_404(db, payload.product_group_id)
     get_class_or_404(db, payload.product_class_id)
     warehouse = resolve_warehouse(db, payload.default_warehouse_id)
@@ -2113,9 +2118,8 @@ def update_product(product_id: int, payload: ProductUpdate, db: Session = Depend
     item.sku = sku
     item.name = payload.name.strip()
     item.unit = payload.unit.strip().upper() or "UN"
-    item.purchase_price = payload.purchase_price
-    item.cost_price = payload.cost_price
-    item.sale_price = payload.sale_price
+    item.suggested_margin_percent = payload.suggested_margin_percent
+    item.sale_price = suggested_sale_price(item.cost_price, payload.suggested_margin_percent)
     item.default_warehouse_id = warehouse["id"] if warehouse else None
     item.default_warehouse_name = warehouse["name"] if warehouse else None
     item.description = payload.description

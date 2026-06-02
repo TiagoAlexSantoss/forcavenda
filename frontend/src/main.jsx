@@ -14,7 +14,7 @@ const emptyCustomerProfile = { code: "", name: "", description: "", max_inactive
 const emptyProfilePaymentRule = { payment_method: "avista", max_installments: "1", max_total_days: "0", active: true };
 const emptyGroup = { code: "", name: "", description: "", active: true };
 const emptyClass = { product_group_id: "", code: "", name: "", description: "", active: true };
-const emptyProduct = { product_group_id: "", product_class_id: "", sku: "", name: "", unit: "UN", purchase_price: "0.00", cost_price: "0.00", sale_price: "0.00", default_warehouse_id: "", description: "", active: true };
+const emptyProduct = { product_group_id: "", product_class_id: "", sku: "", name: "", unit: "UN", purchase_price: "0.00", cost_price: "0.00", suggested_margin_percent: "0.00", sale_price: "0.00", default_warehouse_id: "", description: "", active: true };
 const emptyPriceTable = { code: "", name: "", correction_mode: "outside", monthly_rate: "0.00", base_date: today, active: true };
 const emptyPriceItem = { product_id: "", base_price: "0.00", margin_percent: "5.00", active: true };
 const emptyPriceTier = { min_quantity: "1.00", discount_percent: "0.00", active: true };
@@ -332,7 +332,7 @@ function ProductsBrowser({ products, groups, classes, warehouses, balances, move
   const rows = useMemo(() => filterRows(products, query, ["sku", "name", "product_group_name", "product_class_name"]), [products, query]);
 
   function toForm(item) {
-    return item ? { product_group_id: item.product_group_id || "", product_class_id: item.product_class_id || "", sku: item.sku, name: item.name, unit: item.unit, purchase_price: String(item.purchase_price || "0.00"), cost_price: String(item.cost_price || "0.00"), sale_price: String(item.sale_price || "0.00"), default_warehouse_id: item.default_warehouse_id || "", description: item.description || "", active: item.active } : emptyProduct;
+    return item ? { product_group_id: item.product_group_id || "", product_class_id: item.product_class_id || "", sku: item.sku, name: item.name, unit: item.unit, purchase_price: String(item.purchase_price || "0.00"), cost_price: String(item.cost_price || "0.00"), suggested_margin_percent: String(item.suggested_margin_percent || "0.00"), sale_price: String(item.sale_price || "0.00"), default_warehouse_id: item.default_warehouse_id || "", description: item.description || "", active: item.active } : emptyProduct;
   }
 
   async function save(form, item) {
@@ -344,7 +344,8 @@ function ProductsBrowser({ products, groups, classes, warehouses, balances, move
       unit: form.unit.trim().toUpperCase() || "UN",
       purchase_price: Number(form.purchase_price || 0),
       cost_price: Number(form.cost_price || 0),
-      sale_price: Number(form.sale_price || 0),
+      suggested_margin_percent: Number(form.suggested_margin_percent || 0),
+      sale_price: Number(suggestedProductPrice(form.cost_price, form.suggested_margin_percent) || 0),
       default_warehouse_id: form.default_warehouse_id ? Number(form.default_warehouse_id) : null,
       description: form.description.trim() || null,
       active: form.active,
@@ -355,7 +356,7 @@ function ProductsBrowser({ products, groups, classes, warehouses, balances, move
 
   return (
     <Browser title="Produtos" eyebrow="Cadastros" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: toForm(null) })}>
-      <DataTable columns={["SKU", "Produto", "Grupo", "Local padrao", "Lote", "Compra", "Custo", "Venda ref.", "Status", "Acoes"]} rows={rows.map((item) => [
+      <DataTable columns={["SKU", "Produto", "Grupo", "Local padrao", "Lote", "Ult. compra", "Custo", "Margem", "Preco sugerido", "Status", "Acoes"]} rows={rows.map((item) => [
         item.sku,
         item.name,
         item.product_group_name || "-",
@@ -363,6 +364,7 @@ function ProductsBrowser({ products, groups, classes, warehouses, balances, move
         item.controls_lot ? lotTypeLabel(item.lot_type) : "Nao controla",
         money.format(Number(item.purchase_price || 0)),
         money.format(Number(item.cost_price || 0)),
+        `${decimal.format(Number(item.suggested_margin_percent || 0))}%`,
         money.format(Number(item.sale_price || 0)),
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/products/${item.id}`))} />,
@@ -380,6 +382,7 @@ function ProductModal({ state, setState, groups, classes, warehouses, balances, 
   const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
   const productBalances = item ? balances.filter((row) => String(row.product_external_id) === String(item.id)) : [];
   const productMovements = item ? movements.filter((row) => String(row.product_external_id) === String(item.id)) : [];
+  const suggestedPrice = suggestedProductPrice(form.cost_price, form.suggested_margin_percent);
 
   async function saveLotConfig() {
     if (!item?.id) return;
@@ -412,9 +415,10 @@ function ProductModal({ state, setState, groups, classes, warehouses, balances, 
           <Field label="Classe"><Select value={form.product_class_id} onChange={(v) => update("product_class_id", v)} options={classes} empty="Sem classe" /></Field>
           <Field label="Local padrao"><Select value={form.default_warehouse_id} onChange={(v) => update("default_warehouse_id", v)} options={warehouses} empty="Sem local padrao" /></Field>
           <Field label="Unidade"><input value={form.unit} onChange={(e) => update("unit", e.target.value.toUpperCase())} /></Field>
-          <Field label="Preco compra"><input type="number" min="0" step="0.01" value={form.purchase_price} onChange={(e) => update("purchase_price", e.target.value)} /></Field>
-          <Field label="Custo"><input type="number" min="0" step="0.01" value={form.cost_price} onChange={(e) => update("cost_price", e.target.value)} /></Field>
-          <Field label="Preco referencia"><input type="number" min="0" step="0.01" value={form.sale_price} onChange={(e) => update("sale_price", e.target.value)} /></Field>
+          <Field label="Ult. compra"><input type="number" min="0" step="0.01" value={form.purchase_price} disabled /></Field>
+          <Field label="Custo"><input type="number" min="0" step="0.01" value={form.cost_price} disabled /></Field>
+          <Field label="Margem sugerida (%)"><input type="number" min="0" step="0.01" value={form.suggested_margin_percent} onChange={(e) => update("suggested_margin_percent", e.target.value)} /></Field>
+          <Field label="Preco sugerido"><input type="number" min="0" step="0.01" value={suggestedPrice} disabled /></Field>
           <Field label="Descricao" wide><input value={form.description} onChange={(e) => update("description", e.target.value)} /></Field>
           <Check label="Ativo" checked={form.active} onChange={(v) => update("active", v)} />
           {item && (
@@ -1857,6 +1861,13 @@ function filterRows(items, query, fields) {
   const term = query.trim().toLowerCase();
   if (!term) return items;
   return items.filter((item) => fields.some((field) => String(item[field] || "").toLowerCase().includes(term)));
+}
+
+function suggestedProductPrice(costPrice, marginPercent) {
+  const cost = Number(costPrice || 0);
+  const margin = Number(marginPercent || 0);
+  if (!Number.isFinite(cost) || !Number.isFinite(margin)) return "0.00";
+  return (cost * (1 + margin / 100)).toFixed(2);
 }
 
 createRoot(document.getElementById("root")).render(<App />);
