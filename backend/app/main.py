@@ -1,19 +1,31 @@
-from datetime import date, datetime
+import json
+import re
+import base64
+import unicodedata
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
+from difflib import SequenceMatcher
+from urllib.error import HTTPError, URLError
+from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from jose import JWTError, jwt
+from passlib.context import CryptContext
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.database import Base, engine, get_db
+from app.database import Base, SessionLocal, engine, get_db
 from app.models import (
+    AccessGroup,
     Company,
     CustomerLink,
     CustomerProfile,
     CustomerProfilePaymentRule,
+    ModuleSetting,
     PriceTable,
     PriceTableItem,
     PriceTableItemTier,
@@ -23,8 +35,13 @@ from app.models import (
     SalesOrder,
     SalesOrderItem,
     SalesOrderPayment,
+    SalesRepresentative,
+    SalesRepresentativeCustomer,
+    User,
+    WhatsappOrderSession,
 )
 from app.schemas import (
+    AuthUserRead,
     CompanyLinkUpdate,
     CompanyRead,
     CustomerCreate,
@@ -35,6 +52,8 @@ from app.schemas import (
     CustomerProfileUpdate,
     CustomerRead,
     CustomerUpdate,
+    LoginRequest,
+    LoginResponse,
     PricePreviewRead,
     PriceTableCreate,
     PriceTableItemCreate,
@@ -61,12 +80,139 @@ from app.schemas import (
     SalesOrderRead,
     SalesOrderPaymentCreate,
     SalesOrderUpdate,
+    SalesRepresentativeAssign,
+    SalesRepresentativeCreate,
+    SalesRepresentativeCustomerAssign,
+    SalesRepresentativeCustomerPage,
+    SalesRepresentativeCustomersUpdate,
+    SalesRepresentativeRead,
+    SalesRepresentativeUpdate,
+    SalesRepresentativeWhatsappContext,
     StockBalanceRead,
     StockMovementRead,
+    UserOptionRead,
+    WhatsappAssistantMessage,
+    WhatsappAssistantResponse,
 )
 
 
 settings = get_settings()
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+SALES_PERMISSION_SCOPES = {
+    "sales_products": ["view", "create", "edit", "delete"],
+    "sales_price_tables": ["view", "create", "edit", "delete"],
+    "sales_product_groups": ["view", "create", "edit", "delete"],
+    "sales_product_classes": ["view", "create", "edit", "delete"],
+    "sales_customers": ["view", "create", "edit", "delete"],
+    "sales_customer_profiles": ["view", "create", "edit", "delete"],
+    "sales_representatives": ["view", "create", "edit", "delete"],
+    "sales_orders": ["view", "create", "edit", "delete"],
+    "sales_approvals": ["view", "edit"],
+    "sales_customer_management": ["view", "edit"],
+    "sales_order_assistant": ["view"],
+    "sales_browser_definitions": ["view"],
+}
+
+PUBLIC_PATHS = {"/health", "/auth/login", "/assistant/whatsapp/messages"}
+
+SALES_ROUTE_PERMISSIONS = [
+    ("sales_browser_definitions", ("/control/browser-definitions",)),
+    ("sales_order_assistant", ("/assistant/status",)),
+    ("sales_representatives", ("/sales-representatives", "/users/options")),
+    ("sales_customer_management", ("/customer-monitoring",)),
+    ("sales_customer_profiles", ("/customer-profiles",)),
+    ("sales_customers", ("/customers",)),
+    ("sales_price_tables", ("/price-tables", "/price-preview")),
+    ("sales_product_groups", ("/product-groups",)),
+    ("sales_product_classes", ("/product-classes",)),
+    ("sales_products", ("/products", "/warehouses", "/stock-balances", "/stock-movements")),
+    ("sales_approvals", ("/orders/pending-approval", "/orders/approve", "/orders/reject")),
+    ("sales_orders", ("/orders",)),
+]
+
+
+def create_access_token(subject: str) -> str:
+    expires_at = datetime.now(timezone.utc) + timedelta(minutes=settings.access_token_expire_minutes)
+    return jwt.encode({"sub": subject, "exp": expires_at}, settings.jwt_secret, algorithm="HS256")
+
+
+def verify_password(password: str, password_hash: str) -> bool:
+    return pwd_context.verify(password, password_hash)
+
+
+def full_sales_permissions() -> dict[str, list[str]]:
+    return {scope: actions[:] for scope, actions in SALES_PERMISSION_SCOPES.items()}
+
+
+def user_permissions(db: Session, user: User) -> dict[str, list[str]]:
+    if user.role == "admin":
+        return full_sales_permissions()
+    group = db.get(AccessGroup, user.group_id) if user.group_id else None
+    if not group or not group.active:
+        return {}
+    if group.fixed:
+        return full_sales_permissions()
+    permissions = group.permissions or {}
+    return {
+        scope: [action for action in actions if action in permissions.get(scope, [])]
+        for scope, actions in SALES_PERMISSION_SCOPES.items()
+        if any(action in permissions.get(scope, []) for action in actions)
+    }
+
+
+def user_company_ids(db: Session, user: User) -> list[int]:
+    if user.role == "admin":
+        return list(db.scalars(select(Company.id).where(Company.active == True)).all())
+    group = db.get(AccessGroup, user.group_id) if user.group_id else None
+    if not group or not group.active:
+        return []
+    if group.fixed:
+        return list(db.scalars(select(Company.id).where(Company.active == True)).all())
+    return [
+        int(company_id)
+        for company_id in db.execute(
+            text("SELECT company_id FROM control_access_group_companies WHERE group_id = :group_id AND active = TRUE"),
+            {"group_id": user.group_id},
+        ).scalars().all()
+    ]
+
+
+def user_from_authorization(db: Session, authorization: str | None) -> User | None:
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    try:
+        payload = jwt.decode(authorization.removeprefix("Bearer ").strip(), settings.jwt_secret, algorithms=["HS256"])
+        user_id = payload.get("sub")
+    except JWTError as exc:
+        raise HTTPException(status_code=401, detail="Sessao invalida ou expirada") from exc
+    user = db.get(User, int(user_id)) if user_id else None
+    if not user or not user.active:
+        raise HTTPException(status_code=401, detail="Usuario inativo ou nao encontrado")
+    return user
+
+
+def route_permission(path: str, method: str) -> tuple[str, str] | None:
+    if method == "OPTIONS" or path in PUBLIC_PATHS or path.startswith(("/docs", "/openapi", "/redoc")):
+        return None
+    if path in {"/auth/me", "/companies"}:
+        return None
+    action = {"GET": "view", "POST": "create", "PUT": "edit", "PATCH": "edit", "DELETE": "delete"}.get(method)
+    if not action:
+        return None
+    if path.startswith("/orders/") and any(
+        marker in path
+        for marker in ("/approve-financial", "/approve-commercial", "/reject")
+    ):
+        return "sales_approvals", "edit"
+    for scope, prefixes in SALES_ROUTE_PERMISSIONS:
+        if any(path == prefix or path.startswith(f"{prefix}/") for prefix in prefixes):
+            if scope == "sales_approvals" and action != "view":
+                action = "edit"
+            return scope, action
+    return "sales_orders", "view"
+
+
 app = FastAPI(
     title="EasySales API",
     version="0.1.0",
@@ -78,6 +224,8 @@ app = FastAPI(
     openapi_tags=[
         {"name": "Sistema", "description": "Saude e informacoes da API."},
         {"name": "Clientes", "description": "Clientes locais ou compartilhados por conectores como EasyFinance."},
+        {"name": "Vendedores", "description": "Usuarios comerciais, WhatsApp e carteira de clientes."},
+        {"name": "Assistente WhatsApp", "description": "Interpretacao e criacao assistida de pedidos via WhatsApp."},
         {"name": "Perfis comerciais", "description": "Classificacao configuravel do cliente e regras de aprovacao financeira."},
         {"name": "Produtos", "description": "Catalogo comercial com preco de compra, custo e preco de referencia."},
         {"name": "Tabelas de preco", "description": "Cabecalho e itens de preco por produto, com correcao por dentro ou por fora."},
@@ -93,6 +241,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def enforce_access(request: Request, call_next):
+    requirement = route_permission(request.url.path, request.method)
+    if requirement is None:
+        return await call_next(request)
+    db = SessionLocal()
+    try:
+        try:
+            user = user_from_authorization(db, request.headers.get("Authorization"))
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        if not user:
+            return JSONResponse(status_code=401, content={"detail": "Login obrigatorio"})
+        scope, action = requirement
+        permissions = user_permissions(db, user)
+        allowed = action in (permissions.get(scope) or [])
+        if request.method == "GET" and not allowed:
+            support_scopes = {
+                "sales_products": ("sales_orders",),
+                "sales_price_tables": ("sales_orders",),
+                "sales_customers": ("sales_orders",),
+                "sales_representatives": ("sales_orders",),
+                "sales_orders": ("sales_approvals",),
+            }
+            allowed = any("view" in (permissions.get(candidate) or []) for candidate in support_scopes.get(scope, ()))
+        if not allowed:
+            return JSONResponse(status_code=403, content={"detail": "Acesso nao permitido para esta operacao"})
+        request.state.current_user_id = user.id
+        request.state.allowed_company_ids = user_company_ids(db, user)
+    finally:
+        db.close()
+    return await call_next(request)
 
 
 @app.on_event("startup")
@@ -123,6 +305,12 @@ async def startup():
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_flow_product_lot_configs_product_external_id ON flow_product_lot_configs (product_external_id)"))
         connection.execute(text("ALTER TABLE sf_customer_links ADD COLUMN IF NOT EXISTS customer_profile_id INTEGER"))
         connection.execute(text("ALTER TABLE people ADD COLUMN IF NOT EXISTS credit_limit NUMERIC(14, 2) NOT NULL DEFAULT 0"))
+        connection.execute(text("ALTER TABLE sf_sales_representative_customers ADD COLUMN IF NOT EXISTS customer_person_id INTEGER REFERENCES people(id)"))
+        connection.execute(text("ALTER TABLE sf_sales_representative_customers ADD COLUMN IF NOT EXISTS customer_link_id INTEGER REFERENCES sf_customer_links(id)"))
+        connection.execute(text("UPDATE sf_sales_representative_customers SET customer_person_id = CAST(customer_external_id AS INTEGER) WHERE customer_source = 'easyfinance' AND customer_external_id ~ '^[0-9]+$' AND customer_person_id IS NULL"))
+        connection.execute(text("UPDATE sf_sales_representative_customers SET customer_link_id = CAST(customer_external_id AS INTEGER) WHERE customer_source = 'local' AND customer_external_id ~ '^[0-9]+$' AND customer_link_id IS NULL"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_sf_sales_representative_customers_person_id ON sf_sales_representative_customers (customer_person_id)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_sf_sales_representative_customers_link_id ON sf_sales_representative_customers (customer_link_id)"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS total_cost_amount NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS gross_profit_amount NUMERIC(14, 2) NOT NULL DEFAULT 0"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS profitability_percent NUMERIC(10, 4) NOT NULL DEFAULT 0"))
@@ -137,8 +325,12 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS financial_approved_at TIMESTAMP"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS commercial_approved_at TIMESTAMP"))
         connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES control_companies(id)"))
+        connection.execute(text("ALTER TABLE sf_sales_orders ADD COLUMN IF NOT EXISTS sales_representative_id INTEGER REFERENCES sf_sales_representatives(id)"))
+        connection.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_sf_sales_representatives_whatsapp ON sf_sales_representatives (whatsapp_number)"))
+        connection.execute(text("CREATE TABLE IF NOT EXISTS control_module_settings (id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES control_companies(id), module_code VARCHAR(80) NOT NULL, settings JSON NOT NULL DEFAULT '{}'::json, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, CONSTRAINT uq_control_module_setting UNIQUE (company_id, module_code))"))
         connection.execute(text("UPDATE sf_sales_orders SET company_id = :company_id WHERE company_id IS NULL"), {"company_id": default_company_id})
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_sf_sales_orders_company_status ON sf_sales_orders (company_id, status, approval_stage)"))
+        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_sf_sales_orders_sales_representative_id ON sf_sales_orders (sales_representative_id)"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS warehouse_id INTEGER"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES control_companies(id)"))
         connection.execute(text("UPDATE sf_sales_order_items SET company_id = COALESCE((SELECT o.company_id FROM sf_sales_orders o WHERE o.id = sf_sales_order_items.order_id), :company_id) WHERE company_id IS NULL"), {"company_id": default_company_id})
@@ -214,6 +406,9 @@ def active_company_id(request: Request, db: Session) -> int:
     company = db.get(Company, company_id)
     if not company or not company.active:
         raise HTTPException(status_code=400, detail="Empresa ativa invalida")
+    allowed_company_ids = getattr(request.state, "allowed_company_ids", None)
+    if allowed_company_ids is not None and company.id not in allowed_company_ids:
+        raise HTTPException(status_code=403, detail="Empresa nao liberada para o usuario")
     return company.id
 
 
@@ -434,6 +629,506 @@ def customer_link_for(db: Session, source: str, external_id: str) -> CustomerLin
 def customer_profile_name(db: Session, profile_id: int | None) -> str | None:
     profile = db.get(CustomerProfile, profile_id) if profile_id else None
     return profile.name if profile else None
+
+
+def normalize_phone(value: str) -> str:
+    phone = "".join(character for character in value if character.isdigit())
+    if len(phone) < 10:
+        raise HTTPException(status_code=400, detail="Informe um WhatsApp valido com DDD")
+    if len(phone) in {10, 11}:
+        phone = f"55{phone}"
+    return phone
+
+
+def split_customer_id(customer_id: str) -> tuple[str, str]:
+    source, separator, external_id = customer_id.partition(":")
+    if not separator or not source or not external_id:
+        raise HTTPException(status_code=400, detail="Cliente invalido")
+    return source, external_id
+
+
+def customer_foreign_keys(source: str, external_id: str) -> dict:
+    numeric_id = int(external_id) if external_id.isdigit() else None
+    return {
+        "customer_person_id": numeric_id if source == "easyfinance" else None,
+        "customer_link_id": numeric_id if source == "local" else None,
+    }
+
+
+def sales_representative_for_customer(
+    db: Session,
+    company_id: int,
+    source: str,
+    external_id: str,
+) -> tuple[SalesRepresentative | None, User | None]:
+    assignment = db.scalar(
+        select(SalesRepresentativeCustomer).where(
+            SalesRepresentativeCustomer.company_id == company_id,
+            SalesRepresentativeCustomer.customer_source == source,
+            SalesRepresentativeCustomer.customer_external_id == external_id,
+            SalesRepresentativeCustomer.active == True,
+        )
+    )
+    representative = db.get(SalesRepresentative, assignment.sales_representative_id) if assignment else None
+    user = db.get(User, representative.user_id) if representative else None
+    return representative, user
+
+
+def representative_customer_ids(db: Session, representative_id: int) -> list[str]:
+    assignments = db.scalars(
+        select(SalesRepresentativeCustomer)
+        .where(
+            SalesRepresentativeCustomer.sales_representative_id == representative_id,
+            SalesRepresentativeCustomer.active == True,
+        )
+        .order_by(
+            SalesRepresentativeCustomer.customer_source.asc(),
+            SalesRepresentativeCustomer.customer_external_id.asc(),
+        )
+    ).all()
+    return [f"{item.customer_source}:{item.customer_external_id}" for item in assignments]
+
+
+def representative_to_read(db: Session, item: SalesRepresentative) -> dict:
+    user = db.get(User, item.user_id)
+    customer_ids = representative_customer_ids(db, item.id)
+    return {
+        "id": item.id,
+        "company_id": item.company_id,
+        "user_id": item.user_id,
+        "user_name": user.name if user else "Usuario removido",
+        "user_email": user.email if user else "",
+        "code": item.code,
+        "whatsapp_number": item.whatsapp_number,
+        "active": item.active,
+        "customer_ids": customer_ids,
+        "customer_count": len(customer_ids),
+    }
+
+
+def replace_representative_customers(
+    db: Session,
+    representative: SalesRepresentative,
+    customer_ids: list[str],
+):
+    requested = {split_customer_id(customer_id) for customer_id in customer_ids}
+    existing = db.scalars(
+        select(SalesRepresentativeCustomer).where(
+            SalesRepresentativeCustomer.sales_representative_id == representative.id
+        )
+    ).all()
+    existing_by_customer = {(item.customer_source, item.customer_external_id): item for item in existing}
+    for item in existing:
+        item.active = (item.customer_source, item.customer_external_id) in requested
+    for source, external_id in requested:
+        if not person_available_for_company(db, representative.company_id, source, external_id):
+            raise HTTPException(status_code=400, detail=f"Cliente {source}:{external_id} nao pertence a empresa")
+        assignment = db.scalar(
+            select(SalesRepresentativeCustomer).where(
+                SalesRepresentativeCustomer.company_id == representative.company_id,
+                SalesRepresentativeCustomer.customer_source == source,
+                SalesRepresentativeCustomer.customer_external_id == external_id,
+            )
+        )
+        current = existing_by_customer.get((source, external_id))
+        if current:
+            current.active = True
+        elif assignment:
+            assignment.sales_representative_id = representative.id
+            assignment.active = True
+            assignment.customer_person_id = customer_foreign_keys(source, external_id)["customer_person_id"]
+            assignment.customer_link_id = customer_foreign_keys(source, external_id)["customer_link_id"]
+        else:
+            db.add(
+                SalesRepresentativeCustomer(
+                    company_id=representative.company_id,
+                    sales_representative_id=representative.id,
+                    customer_source=source,
+                    customer_external_id=external_id,
+                    active=True,
+                    **customer_foreign_keys(source, external_id),
+                )
+            )
+
+
+def resolve_order_representative(
+    db: Session,
+    company_id: int,
+    customer_source: str,
+    customer_external_id: str,
+    representative_id: int | None,
+) -> SalesRepresentative | None:
+    if representative_id:
+        representative = db.get(SalesRepresentative, representative_id)
+        if not representative or representative.company_id != company_id or not representative.active:
+            raise HTTPException(status_code=400, detail="Vendedor invalido para a empresa ativa")
+        assignment, _ = sales_representative_for_customer(
+            db, company_id, customer_source, customer_external_id
+        )
+        if not assignment or assignment.id != representative.id:
+            raise HTTPException(status_code=400, detail="Cliente nao pertence a carteira do vendedor")
+        return representative
+    representative, _ = sales_representative_for_customer(
+        db, company_id, customer_source, customer_external_id
+    )
+    return representative if representative and representative.active else None
+
+
+def customer_representative_fields(db: Session, company_id: int, source: str, external_id: str) -> dict:
+    representative, user = sales_representative_for_customer(db, company_id, source, external_id)
+    return {
+        "sales_representative_id": representative.id if representative else None,
+        "sales_representative_name": user.name if user else None,
+    }
+
+
+ORDER_ASSISTANT_MODULE = "sales-whatsapp-assistant"
+
+
+def order_assistant_settings(db: Session, company_id: int) -> dict:
+    item = db.scalar(
+        select(ModuleSetting).where(
+            ModuleSetting.company_id == company_id,
+            ModuleSetting.module_code == ORDER_ASSISTANT_MODULE,
+        )
+    )
+    defaults = {
+        "enabled": False,
+        "provider": "gemini",
+        "model": "gemini-2.5-flash",
+        "api_key": None,
+        "require_confirmation": True,
+        "create_as_draft": True,
+        "default_payment_days": 30,
+        "price_table_id": None,
+        "session_timeout_minutes": 30,
+    }
+    if not item:
+        return defaults
+    return {**defaults, **(item.settings or {}), "enabled": bool(item.active)}
+
+
+def normalize_search(value: str) -> str:
+    ascii_value = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", ascii_value.lower())).strip()
+
+
+def best_catalog_match(query: str, rows: list[dict], fields: tuple[str, ...]) -> tuple[dict | None, float]:
+    target = normalize_search(query)
+    if not target:
+        return None, 0
+    scored = []
+    for row in rows:
+        values = [normalize_search(str(row.get(field) or "")) for field in fields]
+        exact = next((value for value in values if target == value), None)
+        contains = next((value for value in values if target in value or value in target), None)
+        score = 1.0 if exact else 0.92 if contains else max(
+            (SequenceMatcher(None, target, value).ratio() for value in values if value),
+            default=0,
+        )
+        scored.append((score, row))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    return (scored[0][1], scored[0][0]) if scored else (None, 0)
+
+
+def extract_json_object(value: str) -> dict:
+    text_value = value.strip()
+    if text_value.startswith("```"):
+        text_value = re.sub(r"^```(?:json)?\s*|\s*```$", "", text_value, flags=re.IGNORECASE)
+    start = text_value.find("{")
+    end = text_value.rfind("}")
+    if start < 0 or end < start:
+        raise ValueError("Resposta da IA sem JSON")
+    return json.loads(text_value[start:end + 1])
+
+
+def gemini_extract_order(message: str, customers: list[dict], products: list[dict], settings_value: dict) -> dict:
+    api_key = settings_value.get("api_key")
+    model = settings_value.get("model") or "gemini-2.5-flash"
+    if not api_key:
+        raise RuntimeError("Chave da IA nao configurada no EasyControl")
+    customer_catalog = [{"id": row["id"], "name": row["name"]} for row in customers]
+    product_catalog = [{"id": row["id"], "sku": row["sku"], "name": row["name"]} for row in products]
+    prompt = (
+        "Extraia um pedido comercial da mensagem. Responda somente JSON valido com: "
+        '{"customer":"texto ou null","items":[{"product":"texto","quantity":numero}],'
+        '"payment_days":numero ou null,"payment_terms":[numero],"delivery_date":"YYYY-MM-DD ou null"}. '
+        "Em payment_terms, preserve todos os prazos informados, por exemplo 30/60/90. "
+        "Use payment_days como o maior prazo ou null quando nenhum prazo for informado. "
+        "Nao invente cliente nem produto. Catalogo de clientes: "
+        f"{json.dumps(customer_catalog, ensure_ascii=False)}. Catalogo de produtos: "
+        f"{json.dumps(product_catalog, ensure_ascii=False)}. Mensagem: {message}"
+    )
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": 1200,
+            "responseMimeType": "application/json",
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
+    }
+    request_data = UrlRequest(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+    )
+    try:
+        with urlopen(request_data, timeout=60) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise RuntimeError(f"IA retornou erro {exc.code}") from exc
+    except URLError as exc:
+        raise RuntimeError("Nao foi possivel acessar o provedor de IA") from exc
+    parts = (body.get("candidates") or [{}])[0].get("content", {}).get("parts") or []
+    content = "\n".join(part.get("text", "") for part in parts)
+    return extract_json_object(content)
+
+
+def gemini_transcribe_audio(audio_base64: str, mime_type: str | None, settings_value: dict) -> str:
+    api_key = settings_value.get("api_key")
+    model = settings_value.get("model") or "gemini-2.5-flash"
+    if not api_key:
+        raise RuntimeError("Chave da IA nao configurada no EasyControl")
+    try:
+        base64.b64decode(audio_base64, validate=True)
+    except Exception as exc:
+        raise RuntimeError("Audio recebido em formato invalido") from exc
+    payload = {
+        "contents": [{
+            "role": "user",
+            "parts": [
+                {"text": "Transcreva este audio em portugues brasileiro. Retorne somente o texto falado."},
+                {"inline_data": {"mime_type": mime_type or "audio/ogg", "data": audio_base64}},
+            ],
+        }],
+        "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1200, "thinkingConfig": {"thinkingBudget": 0}},
+    }
+    request_data = UrlRequest(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+    )
+    try:
+        with urlopen(request_data, timeout=90) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raise RuntimeError(f"IA retornou erro {exc.code} ao transcrever o audio") from exc
+    except URLError as exc:
+        raise RuntimeError("Nao foi possivel transcrever o audio agora") from exc
+    parts = (body.get("candidates") or [{}])[0].get("content", {}).get("parts") or []
+    transcription = "\n".join(part.get("text", "") for part in parts if part.get("text")).strip()
+    if not transcription:
+        raise RuntimeError("Nao consegui entender o audio. Tente novamente ou envie por texto.")
+    return transcription
+
+
+def representative_customers_for_assistant(db: Session, representative: SalesRepresentative) -> list[dict]:
+    rows = []
+    for customer_id in representative_customer_ids(db, representative.id):
+        customer = resolve_customer(db, customer_id)
+        rows.append({"id": customer_id, "name": customer["name"]})
+    return rows
+
+
+def assistant_products(db: Session, company_id: int, price_table_id: int) -> list[dict]:
+    products = db.scalars(
+        select(Product)
+        .join(PriceTableItem, PriceTableItem.product_id == Product.id)
+        .where(
+            Product.active == True,
+            PriceTableItem.price_table_id == price_table_id,
+            PriceTableItem.active == True,
+            text("EXISTS (SELECT 1 FROM control_product_companies pc WHERE pc.company_id = :company_id AND pc.product_source = 'easysales' AND pc.product_external_id = CAST(sf_products.id AS VARCHAR) AND pc.active = TRUE)"),
+        )
+        .params(company_id=company_id)
+        .order_by(Product.name.asc())
+    ).all()
+    return [{"id": item.id, "sku": item.sku, "name": item.name} for item in products]
+
+
+def assistant_price_table(db: Session, company_id: int, configured_id: int | None) -> PriceTable:
+    if configured_id:
+        table = db.get(PriceTable, configured_id)
+        if table and table.active and catalog_available_for_company(db, company_id, "sf_price_tables", table.id):
+            return table
+    table = db.scalar(
+        select(PriceTable).where(
+            PriceTable.active == True,
+            text("EXISTS (SELECT 1 FROM control_catalog_companies cc WHERE cc.company_id = :company_id AND cc.catalog_key = 'sf_price_tables' AND cc.record_id = CAST(sf_price_tables.id AS VARCHAR) AND cc.active = TRUE)"),
+        ).params(company_id=company_id).order_by(PriceTable.id.asc())
+    )
+    if not table:
+        raise HTTPException(status_code=400, detail="Nenhuma tabela de preco ativa para a empresa")
+    return table
+
+
+def build_assistant_draft(db: Session, representative: SalesRepresentative, message: str, settings_value: dict) -> dict:
+    customers = representative_customers_for_assistant(db, representative)
+    table = assistant_price_table(db, representative.company_id, settings_value.get("price_table_id"))
+    products = assistant_products(db, representative.company_id, table.id)
+    extracted = gemini_extract_order(message, customers, products, settings_value)
+    customer, customer_score = best_catalog_match(str(extracted.get("customer") or ""), customers, ("id", "name"))
+    if not customer or customer_score < 0.72:
+        raise HTTPException(status_code=400, detail="Nao identifiquei com seguranca o cliente da sua carteira. Informe o nome do cliente.")
+    resolved_items = []
+    for raw_item in extracted.get("items") or []:
+        quantity = Decimal(str(raw_item.get("quantity") or 0))
+        product, score = best_catalog_match(str(raw_item.get("product") or ""), products, ("sku", "name"))
+        if not product or score < 0.70 or quantity <= 0:
+            raise HTTPException(status_code=400, detail=f"Nao identifiquei produto ou quantidade em: {raw_item.get('product') or 'item'}")
+        resolved_items.append({"product_id": product["id"], "sku": product["sku"], "name": product["name"], "quantity": str(quantity)})
+    if not resolved_items:
+        raise HTTPException(status_code=400, detail="Nao encontrei produtos e quantidades na mensagem.")
+    raw_payment_terms = extracted.get("payment_terms") or []
+    payment_terms = sorted({
+        max(int(value), 0)
+        for value in raw_payment_terms
+        if value is not None and str(value).strip()
+    })
+    if not payment_terms:
+        payment_terms = [max(int(extracted.get("payment_days") or settings_value.get("default_payment_days") or 30), 0)]
+    payment_days = max(payment_terms)
+    payment_due_date = date.today() + timedelta(days=max(payment_days, 0))
+    total = Decimal("0")
+    for item in resolved_items:
+        price_item = db.scalar(select(PriceTableItem).where(
+            PriceTableItem.price_table_id == table.id,
+            PriceTableItem.product_id == item["product_id"],
+            PriceTableItem.active == True,
+        ))
+        if not price_item:
+            raise HTTPException(status_code=400, detail=f"Produto {item['sku']} sem preco na tabela {table.name}.")
+        quantity = Decimal(item["quantity"])
+        unit_price = apply_progressive_discount(
+            corrected_price(table, price_item.base_price, payment_due_date),
+            applicable_progressive_tier(db, price_item, quantity),
+        )
+        item["unit_price"] = str(money_round(unit_price))
+        item["total"] = str(money_round(unit_price * quantity))
+        total += Decimal(item["total"])
+    return {
+        "customer_id": customer["id"],
+        "customer_name": customer["name"],
+        "price_table_id": table.id,
+        "price_table_name": table.name,
+        "payment_days": payment_days,
+        "payment_terms": payment_terms,
+        "payment_due_date": payment_due_date.isoformat(),
+        "delivery_date": extracted.get("delivery_date"),
+        "items": resolved_items,
+        "total": str(money_round(total)),
+    }
+
+
+def assistant_summary(draft: dict) -> str:
+    lines = [f"Cliente: {draft['customer_name']}"]
+    lines.extend(
+        f"- {item['quantity']} x {item['sku']} {item['name']} = R$ {Decimal(item['total']):.2f}"
+        for item in draft["items"]
+    )
+    lines.append(f"Total: R$ {Decimal(draft['total']):.2f}")
+    payment_terms = draft.get("payment_terms") or [draft["payment_days"]]
+    lines.append(f"Pagamento: {'/'.join(str(days) for days in payment_terms)} dia(s)")
+    lines.append("Responda SIM para criar o pedido ou CANCELAR.")
+    return "\n".join(lines)
+
+
+def assistant_catalog(db: Session, representative: SalesRepresentative, settings_value: dict, message: str) -> str:
+    table = assistant_price_table(db, representative.company_id, settings_value.get("price_table_id"))
+    products = assistant_products(db, representative.company_id, table.id)
+    normalized = normalize_search(message)
+    ignored_terms = {
+        "a", "ao", "as", "catalogo", "da", "das", "de", "do", "dos", "e", "envia",
+        "enviar", "envie", "favor", "me", "manda", "mandar", "mim", "mostra", "mostrar",
+        "o", "os", "para", "poder", "por", "preco", "precos", "produto", "produtos",
+        "qual", "que", "quero", "tambem", "tabela", "um", "uma", "ver", "vigente",
+    }
+    query_terms = [token for token in normalized.split() if token not in ignored_terms]
+    if query_terms:
+        def matches_query(product: dict) -> bool:
+            product_terms = normalize_search(f"{product['sku']} {product['name']}").split()
+            return any(
+                query_term in product_term
+                or product_term in query_term
+                or SequenceMatcher(None, query_term, product_term).ratio() >= 0.82
+                for query_term in query_terms
+                for product_term in product_terms
+            )
+
+        products = [
+            product for product in products
+            if matches_query(product)
+        ]
+    if not products:
+        return f"Nao encontrei produtos para essa busca na tabela {table.name}."
+    due_date = date.today() + timedelta(days=int(settings_value.get("default_payment_days") or 30))
+    lines = [f"Catalogo vigente: {table.code} - {table.name}"]
+    for product in products[:30]:
+        item = db.scalar(select(PriceTableItem).where(
+            PriceTableItem.price_table_id == table.id,
+            PriceTableItem.product_id == product["id"],
+            PriceTableItem.active == True,
+        ))
+        if not item:
+            continue
+        price = money_round(corrected_price(table, item.base_price, due_date))
+        lines.append(f"- {product['sku']} | {product['name']} | R$ {price:.2f}")
+    if len(products) > 30:
+        lines.append(f"Mostrando 30 de {len(products)} produtos. Envie 'catalogo' com o nome para filtrar.")
+    return "\n".join(lines)
+
+
+def create_order_from_assistant(db: Session, representative: SalesRepresentative, draft: dict) -> SalesOrder:
+    customer = resolve_customer(db, draft["customer_id"])
+    table = get_price_table_or_404(db, int(draft["price_table_id"]))
+    order = SalesOrder(
+        company_id=representative.company_id,
+        sales_representative_id=representative.id,
+        order_number=next_order_number(db),
+        order_type="sale",
+        customer_source=customer["source"],
+        customer_external_id=customer["external_id"],
+        customer_name=customer["name"],
+        price_table_id=table.id,
+        order_date=date.today(),
+        payment_due_date=date.fromisoformat(draft["payment_due_date"]),
+        delivery_date=date.fromisoformat(draft["delivery_date"]) if draft.get("delivery_date") else None,
+        status="draft",
+        approval_stage="draft",
+        total_amount=Decimal("0"),
+        total_cost_amount=Decimal("0"),
+        gross_profit_amount=Decimal("0"),
+        profitability_percent=Decimal("0"),
+        notes="Pedido criado pelo Assistente de Pedidos via WhatsApp.",
+    )
+    db.add(order)
+    db.flush()
+    sales_order_operation(db, order)
+    payload_items = [
+        SalesOrderItemCreate(product_id=item["product_id"], quantity=Decimal(item["quantity"]))
+        for item in draft["items"]
+    ]
+    build_order_items(db, order, table, payload_items, order.payment_due_date)
+    recalculate_order_totals(db, order)
+    payment_terms = draft.get("payment_terms") or [int(draft.get("payment_days") or 0)]
+    installment_count = len(payment_terms)
+    installment_amount = money_round(order.total_amount / installment_count)
+    allocated_amount = Decimal("0")
+    for index, payment_days in enumerate(payment_terms):
+        amount = order.total_amount - allocated_amount if index == installment_count - 1 else installment_amount
+        allocated_amount += amount
+        db.add(SalesOrderPayment(
+            company_id=order.company_id,
+            order_id=order.id,
+            payment_method="avista" if int(payment_days) == 0 else "boleto",
+            due_date=date.today() + timedelta(days=int(payment_days)),
+            amount=amount,
+            notes="Sugestao gerada pelo Assistente de Pedidos via WhatsApp.",
+        ))
+    return order
 
 
 def profile_by_code(db: Session, code: str) -> CustomerProfile | None:
@@ -1055,6 +1750,8 @@ def order_authorization_reasons(db: Session, order: SalesOrder, items: list[Sale
 
 def order_to_read(db: Session, order: SalesOrder) -> dict:
     table = db.get(PriceTable, order.price_table_id)
+    representative = db.get(SalesRepresentative, order.sales_representative_id) if order.sales_representative_id else None
+    representative_user = db.get(User, representative.user_id) if representative else None
     items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id).order_by(SalesOrderItem.id.asc())).all()
     payment_suggestions = db.scalars(select(SalesOrderPayment).where(SalesOrderPayment.order_id == order.id).order_by(SalesOrderPayment.due_date.asc(), SalesOrderPayment.id.asc())).all()
     return {
@@ -1065,6 +1762,9 @@ def order_to_read(db: Session, order: SalesOrder) -> dict:
         "customer_source": order.customer_source,
         "customer_external_id": order.customer_external_id,
         "customer_name": order.customer_name,
+        "sales_representative_id": order.sales_representative_id,
+        "sales_representative_name": representative_user.name if representative_user else None,
+        "sales_representative_whatsapp": representative.whatsapp_number if representative else None,
         "price_table_id": order.price_table_id,
         "price_table_name": table.name if table else None,
         "order_date": order.order_date,
@@ -1430,14 +2130,59 @@ def build_order_items(db: Session, order: SalesOrder, table: PriceTable, payload
         apply_payload_to_order_item(db, order, table, payload_item)
 
 
+@app.post("/auth/login", response_model=LoginResponse, tags=["Sistema"])
+def login(payload: LoginRequest, db: Session = Depends(get_db)):
+    user = db.scalar(select(User).where(User.email == payload.email.strip().lower(), User.active == True))
+    if not user or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="E-mail ou senha invalidos")
+    return LoginResponse(
+        access_token=create_access_token(str(user.id)),
+        user=AuthUserRead(
+            id=user.id,
+            name=user.name,
+            email=user.email,
+            role=user.role,
+            group_id=user.group_id,
+            permissions=user_permissions(db, user),
+            company_ids=user_company_ids(db, user),
+        ),
+    )
+
+
+@app.get("/auth/me", response_model=AuthUserRead, tags=["Sistema"])
+def me(request: Request, db: Session = Depends(get_db)):
+    user = user_from_authorization(db, request.headers.get("Authorization"))
+    if not user:
+        raise HTTPException(status_code=401, detail="Login obrigatorio")
+    return AuthUserRead(
+        id=user.id,
+        name=user.name,
+        email=user.email,
+        role=user.role,
+        group_id=user.group_id,
+        permissions=user_permissions(db, user),
+        company_ids=user_company_ids(db, user),
+    )
+
+
 @app.get("/health", tags=["Sistema"])
 def health():
     return {"ok": True, "service": "easysales", "customer_provider": settings.customer_provider}
 
 
 @app.get("/companies", response_model=list[CompanyRead], tags=["Sistema"])
-def list_companies(db: Session = Depends(get_db)):
-    return db.scalars(select(Company).where(Company.active == True).order_by(Company.company_kind.desc(), Company.name.asc())).all()
+def list_companies(request: Request, db: Session = Depends(get_db)):
+    user = user_from_authorization(db, request.headers.get("Authorization"))
+    if not user:
+        raise HTTPException(status_code=401, detail="Login obrigatorio")
+    allowed = user_company_ids(db, user)
+    if not allowed:
+        return []
+    return db.scalars(
+        select(Company)
+        .where(Company.active == True, Company.id.in_(allowed))
+        .order_by(Company.company_kind.desc(), Company.name.asc())
+    ).all()
 
 
 @app.get("/control/browser-definitions", tags=["Sistema"])
@@ -1466,9 +2211,12 @@ def list_control_browser_definitions(db: Session = Depends(get_db)):
                     c.width AS column_width
                 FROM control_browser_definitions b
                 JOIN control_metadata_entities e ON e.id = b.entity_id
+                JOIN control_platforms p ON p.id = e.platform_id
                 LEFT JOIN control_browser_columns c ON c.browser_id = b.id AND c.active = TRUE
                 LEFT JOIN control_metadata_fields f ON f.id = c.field_id AND f.active = TRUE
-                WHERE b.active = TRUE
+                WHERE p.code = 'easysales'
+                  AND p.active = TRUE
+                  AND b.active = TRUE
                   AND e.active = TRUE
                 ORDER BY e.display_name, b.name, c.ordinal, f.display_name
                 """
@@ -1556,6 +2304,670 @@ def list_control_browser_definitions(db: Session = Depends(get_db)):
     return list(browsers.values())
 
 
+@app.get("/users/options", response_model=list[UserOptionRead], tags=["Vendedores"])
+def list_user_options(db: Session = Depends(get_db)):
+    return db.scalars(select(User).where(User.active == True).order_by(User.name.asc())).all()
+
+
+@app.get("/sales-representatives", response_model=list[SalesRepresentativeRead], tags=["Vendedores"])
+def list_sales_representatives(request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
+    items = db.scalars(
+        select(SalesRepresentative)
+        .where(SalesRepresentative.company_id == company_id)
+        .order_by(SalesRepresentative.active.desc(), SalesRepresentative.id.asc())
+    ).all()
+    return [representative_to_read(db, item) for item in items]
+
+
+@app.post(
+    "/sales-representatives",
+    response_model=SalesRepresentativeRead,
+    status_code=status.HTTP_201_CREATED,
+    tags=["Vendedores"],
+)
+def create_sales_representative(
+    payload: SalesRepresentativeCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    company_id = active_company_id(request, db)
+    user = db.get(User, payload.user_id)
+    if not user or not user.active:
+        raise HTTPException(status_code=400, detail="Usuario invalido ou inativo")
+    representative = SalesRepresentative(
+        company_id=company_id,
+        user_id=user.id,
+        code=normalize_code(payload.code, "Codigo") if payload.code else None,
+        whatsapp_number=normalize_phone(payload.whatsapp_number),
+        active=payload.active,
+    )
+    db.add(representative)
+    try:
+        db.flush()
+        if payload.customer_ids:
+            replace_representative_customers(db, representative, payload.customer_ids)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Usuario ou WhatsApp ja cadastrado como vendedor nesta empresa")
+    db.refresh(representative)
+    return representative_to_read(db, representative)
+
+
+@app.put("/sales-representatives/{representative_id}", response_model=SalesRepresentativeRead, tags=["Vendedores"])
+def update_sales_representative(
+    representative_id: int,
+    payload: SalesRepresentativeUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    company_id = active_company_id(request, db)
+    representative = db.get(SalesRepresentative, representative_id)
+    if not representative or representative.company_id != company_id:
+        raise HTTPException(status_code=404, detail="Vendedor nao encontrado")
+    user = db.get(User, payload.user_id)
+    if not user or not user.active:
+        raise HTTPException(status_code=400, detail="Usuario invalido ou inativo")
+    representative.user_id = user.id
+    representative.code = normalize_code(payload.code, "Codigo") if payload.code else None
+    representative.whatsapp_number = normalize_phone(payload.whatsapp_number)
+    representative.active = payload.active
+    try:
+        if payload.customer_ids is not None:
+            replace_representative_customers(db, representative, payload.customer_ids)
+        db.commit()
+    except SQLAlchemyError:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Usuario ou WhatsApp ja cadastrado como vendedor nesta empresa")
+    db.refresh(representative)
+    return representative_to_read(db, representative)
+
+
+def customer_directory_sql(where_clause: str = "") -> str:
+    return f"""
+        SELECT *
+        FROM (
+            SELECT
+                'easyfinance' AS customer_source,
+                CAST(p.id AS VARCHAR) AS customer_external_id,
+                'EF-' || LPAD(CAST(p.id AS VARCHAR), 6, '0') AS customer_code,
+                p.name AS customer_name,
+                p.document_number,
+                p.city,
+                p.state_code
+            FROM people p
+            JOIN control_person_companies pc
+              ON pc.person_source = 'easyfinance'
+             AND pc.person_external_id = CAST(p.id AS VARCHAR)
+             AND pc.company_id = :company_id
+             AND pc.active = TRUE
+            WHERE p.is_customer = TRUE AND p.active = TRUE
+
+            UNION ALL
+
+            SELECT
+                'local' AS customer_source,
+                CAST(c.id AS VARCHAR) AS customer_external_id,
+                'LC-' || LPAD(CAST(c.id AS VARCHAR), 6, '0') AS customer_code,
+                c.name AS customer_name,
+                c.document_number,
+                c.city,
+                c.state_code
+            FROM sf_customer_links c
+            JOIN control_person_companies pc
+              ON pc.person_source = 'local'
+             AND pc.person_external_id = CAST(c.id AS VARCHAR)
+             AND pc.company_id = :company_id
+             AND pc.active = TRUE
+            WHERE c.source = 'local' AND c.active = TRUE
+        ) customers
+        {where_clause}
+    """
+
+
+@app.get(
+    "/sales-representatives/customer-options",
+    response_model=SalesRepresentativeCustomerPage,
+    tags=["Vendedores"],
+)
+def search_sales_representative_customer_options(
+    request: Request,
+    query: str = "",
+    page: int = 1,
+    page_size: int = 20,
+    db: Session = Depends(get_db),
+):
+    company_id = active_company_id(request, db)
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 100)
+    search = f"%{query.strip()}%"
+    directory = customer_directory_sql(
+        """
+        WHERE (
+            :query = ''
+            OR customers.customer_code ILIKE :search
+            OR customers.customer_name ILIKE :search
+            OR COALESCE(customers.document_number, '') ILIKE :search
+            OR COALESCE(customers.city, '') ILIKE :search
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM sf_sales_representative_customers src
+            WHERE src.company_id = :company_id
+              AND src.customer_source = customers.customer_source
+              AND src.customer_external_id = customers.customer_external_id
+              AND src.active = TRUE
+        )
+        """
+    )
+    params = {
+        "company_id": company_id,
+        "query": query.strip(),
+        "search": search,
+        "limit": page_size,
+        "offset": (page - 1) * page_size,
+    }
+    total = db.execute(text(f"SELECT COUNT(*) FROM ({directory}) available"), params).scalar() or 0
+    rows = db.execute(
+        text(
+            f"""
+            SELECT *
+            FROM ({directory}) available
+            ORDER BY customer_name ASC, customer_code ASC
+            LIMIT :limit OFFSET :offset
+            """
+        ),
+        params,
+    ).mappings().all()
+    return {
+        "items": [
+            {
+                **dict(row),
+                "customer_id": f"{row['customer_source']}:{row['customer_external_id']}",
+            }
+            for row in rows
+        ],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": max((total + page_size - 1) // page_size, 1),
+    }
+
+
+@app.get(
+    "/sales-representatives/{representative_id}/customers",
+    response_model=SalesRepresentativeCustomerPage,
+    tags=["Vendedores"],
+)
+def list_sales_representative_customers(
+    representative_id: int,
+    request: Request,
+    query: str = "",
+    page: int = 1,
+    page_size: int = 30,
+    db: Session = Depends(get_db),
+):
+    company_id = active_company_id(request, db)
+    representative = db.get(SalesRepresentative, representative_id)
+    if not representative or representative.company_id != company_id:
+        raise HTTPException(status_code=404, detail="Vendedor nao encontrado")
+    page = max(page, 1)
+    page_size = min(max(page_size, 1), 100)
+    search = f"%{query.strip()}%"
+    directory = customer_directory_sql()
+    base_query = f"""
+        SELECT
+            src.id AS assignment_id,
+            customers.*,
+            sr.id AS sales_representative_id,
+            sr.code AS sales_representative_code,
+            u.name AS sales_representative_name
+        FROM sf_sales_representative_customers src
+        JOIN ({directory}) customers
+          ON customers.customer_source = src.customer_source
+         AND customers.customer_external_id = src.customer_external_id
+        JOIN sf_sales_representatives sr ON sr.id = src.sales_representative_id
+        JOIN users u ON u.id = sr.user_id
+        WHERE src.company_id = :company_id
+          AND src.sales_representative_id = :representative_id
+          AND src.active = TRUE
+          AND (
+              :query = ''
+              OR customers.customer_code ILIKE :search
+              OR customers.customer_name ILIKE :search
+              OR COALESCE(customers.document_number, '') ILIKE :search
+          )
+    """
+    params = {
+        "company_id": company_id,
+        "representative_id": representative_id,
+        "query": query.strip(),
+        "search": search,
+        "limit": page_size,
+        "offset": (page - 1) * page_size,
+    }
+    total = db.execute(text(f"SELECT COUNT(*) FROM ({base_query}) portfolio"), params).scalar() or 0
+    rows = db.execute(
+        text(
+            f"""
+            SELECT *
+            FROM ({base_query}) portfolio
+            ORDER BY customer_name ASC, customer_code ASC
+            LIMIT :limit OFFSET :offset
+            """
+        ),
+        params,
+    ).mappings().all()
+    return {
+        "items": [
+            {
+                **dict(row),
+                "customer_id": f"{row['customer_source']}:{row['customer_external_id']}",
+            }
+            for row in rows
+        ],
+        "page": page,
+        "page_size": page_size,
+        "total": total,
+        "total_pages": max((total + page_size - 1) // page_size, 1),
+    }
+
+
+@app.post(
+    "/sales-representatives/{representative_id}/customers",
+    response_model=SalesRepresentativeCustomerPage,
+    tags=["Vendedores"],
+)
+def add_sales_representative_customer(
+    representative_id: int,
+    payload: SalesRepresentativeCustomerAssign,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    company_id = active_company_id(request, db)
+    representative = db.get(SalesRepresentative, representative_id)
+    if not representative or representative.company_id != company_id:
+        raise HTTPException(status_code=404, detail="Vendedor nao encontrado")
+    source, external_id = split_customer_id(payload.customer_id)
+    if not person_available_for_company(db, company_id, source, external_id):
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado na empresa ativa")
+    assignment = db.scalar(
+        select(SalesRepresentativeCustomer).where(
+            SalesRepresentativeCustomer.company_id == company_id,
+            SalesRepresentativeCustomer.customer_source == source,
+            SalesRepresentativeCustomer.customer_external_id == external_id,
+        )
+    )
+    if assignment:
+        assignment.sales_representative_id = representative.id
+        assignment.active = True
+        foreign_keys = customer_foreign_keys(source, external_id)
+        assignment.customer_person_id = foreign_keys["customer_person_id"]
+        assignment.customer_link_id = foreign_keys["customer_link_id"]
+    else:
+        db.add(
+            SalesRepresentativeCustomer(
+                company_id=company_id,
+                sales_representative_id=representative.id,
+                customer_source=source,
+                customer_external_id=external_id,
+                active=True,
+                **customer_foreign_keys(source, external_id),
+            )
+        )
+    db.commit()
+    return list_sales_representative_customers(representative.id, request, db=db)
+
+
+@app.delete(
+    "/sales-representatives/{representative_id}/customers/{source}/{external_id}",
+    tags=["Vendedores"],
+)
+def remove_sales_representative_customer(
+    representative_id: int,
+    source: str,
+    external_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    company_id = active_company_id(request, db)
+    assignment = db.scalar(
+        select(SalesRepresentativeCustomer).where(
+            SalesRepresentativeCustomer.company_id == company_id,
+            SalesRepresentativeCustomer.sales_representative_id == representative_id,
+            SalesRepresentativeCustomer.customer_source == source,
+            SalesRepresentativeCustomer.customer_external_id == external_id,
+            SalesRepresentativeCustomer.active == True,
+        )
+    )
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Vinculo nao encontrado")
+    assignment.active = False
+    db.commit()
+    return {"ok": True}
+
+
+@app.put(
+    "/sales-representatives/{representative_id}/customers",
+    response_model=SalesRepresentativeRead,
+    tags=["Vendedores"],
+)
+def update_sales_representative_customers(
+    representative_id: int,
+    payload: SalesRepresentativeCustomersUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    representative = db.get(SalesRepresentative, representative_id)
+    if not representative or representative.company_id != active_company_id(request, db):
+        raise HTTPException(status_code=404, detail="Vendedor nao encontrado")
+    replace_representative_customers(db, representative, payload.customer_ids)
+    db.commit()
+    return representative_to_read(db, representative)
+
+
+@app.delete("/sales-representatives/{representative_id}", tags=["Vendedores"])
+def delete_sales_representative(
+    representative_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    representative = db.get(SalesRepresentative, representative_id)
+    if not representative or representative.company_id != active_company_id(request, db):
+        raise HTTPException(status_code=404, detail="Vendedor nao encontrado")
+    linked_order = db.scalar(
+        select(SalesOrder).where(SalesOrder.sales_representative_id == representative.id)
+    )
+    if linked_order:
+        representative.active = False
+    else:
+        for assignment in db.scalars(
+            select(SalesRepresentativeCustomer).where(
+                SalesRepresentativeCustomer.sales_representative_id == representative.id
+            )
+        ).all():
+            db.delete(assignment)
+        db.flush()
+        db.delete(representative)
+    db.commit()
+    return {"ok": True}
+
+
+@app.put(
+    "/customers/{source}/{external_id}/sales-representative",
+    response_model=CustomerRead,
+    tags=["Vendedores"],
+)
+def assign_customer_sales_representative(
+    source: str,
+    external_id: str,
+    payload: SalesRepresentativeAssign,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    company_id = active_company_id(request, db)
+    if not person_available_for_company(db, company_id, source, external_id):
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado na empresa ativa")
+    current = db.scalar(
+        select(SalesRepresentativeCustomer).where(
+            SalesRepresentativeCustomer.company_id == company_id,
+            SalesRepresentativeCustomer.customer_source == source,
+            SalesRepresentativeCustomer.customer_external_id == external_id,
+        )
+    )
+    if current:
+        current.active = False
+    if payload.sales_representative_id:
+        representative = db.get(SalesRepresentative, payload.sales_representative_id)
+        if not representative or representative.company_id != company_id or not representative.active:
+            raise HTTPException(status_code=400, detail="Vendedor invalido")
+        if current:
+            current.sales_representative_id = representative.id
+            current.active = True
+            foreign_keys = customer_foreign_keys(source, external_id)
+            current.customer_person_id = foreign_keys["customer_person_id"]
+            current.customer_link_id = foreign_keys["customer_link_id"]
+        else:
+            db.add(
+                SalesRepresentativeCustomer(
+                    company_id=company_id,
+                    sales_representative_id=representative.id,
+                    customer_source=source,
+                    customer_external_id=external_id,
+                    active=True,
+                    **customer_foreign_keys(source, external_id),
+                )
+            )
+    db.commit()
+    customer = next(
+        (
+            item
+            for item in list_customers(request, db)
+            if item["source"] == source and item["id"] == f"{source}:{external_id}"
+        ),
+        None,
+    )
+    if not customer:
+        raise HTTPException(status_code=404, detail="Cliente nao encontrado")
+    return customer
+
+
+@app.get(
+    "/sales-representatives/whatsapp/{whatsapp_number}/context",
+    response_model=SalesRepresentativeWhatsappContext,
+    tags=["Vendedores"],
+)
+def sales_representative_whatsapp_context(
+    whatsapp_number: str,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    phone = normalize_phone(whatsapp_number)
+    representative = db.scalar(
+        select(SalesRepresentative).where(
+            SalesRepresentative.whatsapp_number == phone,
+            SalesRepresentative.active == True,
+        )
+    )
+    if not representative:
+        raise HTTPException(status_code=404, detail="Vendedor nao identificado pelo WhatsApp")
+    assignments = db.scalars(
+        select(SalesRepresentativeCustomer).where(
+            SalesRepresentativeCustomer.sales_representative_id == representative.id,
+            SalesRepresentativeCustomer.active == True,
+        )
+    ).all()
+    customers = []
+    for assignment in assignments:
+        customer = resolve_customer(
+            db, f"{assignment.customer_source}:{assignment.customer_external_id}"
+        )
+        customers.append(
+            {
+                "id": f"{assignment.customer_source}:{assignment.customer_external_id}",
+                "source": assignment.customer_source,
+                "customer_profile_id": customer.get("profile_id"),
+                "customer_profile_name": customer_profile_name(db, customer.get("profile_id")),
+                "name": customer["name"],
+                "active": True,
+                "company_ids": [representative.company_id],
+                "sales_representative_id": representative.id,
+                "sales_representative_name": representative_to_read(db, representative)["user_name"],
+            }
+        )
+    return {
+        "sales_representative": representative_to_read(db, representative),
+        "customers": customers,
+    }
+
+
+@app.post(
+    "/assistant/whatsapp/messages",
+    response_model=WhatsappAssistantResponse,
+    tags=["Assistente WhatsApp"],
+)
+def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Session = Depends(get_db)):
+    phone = normalize_phone(payload.whatsapp_number)
+    representative = db.scalar(
+        select(SalesRepresentative).where(
+            SalesRepresentative.whatsapp_number == phone,
+            SalesRepresentative.active == True,
+        )
+    )
+    if not representative:
+        return {"reply": "Seu numero nao esta vinculado a um vendedor ativo no EasySales.", "state": "unauthorized"}
+    settings_value = order_assistant_settings(db, representative.company_id)
+    if not settings_value["enabled"]:
+        return {
+            "reply": "O Assistente de Pedidos via WhatsApp esta desativado para sua empresa.",
+            "state": "disabled",
+            "sales_representative_id": representative.id,
+        }
+    message_text = payload.text.strip()
+    if payload.audio_base64:
+        try:
+            message_text = gemini_transcribe_audio(
+                payload.audio_base64,
+                payload.audio_mime_type,
+                settings_value,
+            )
+        except RuntimeError as exc:
+            return {
+                "reply": str(exc),
+                "state": "transcription_error",
+                "sales_representative_id": representative.id,
+            }
+    if not message_text:
+        return {
+            "reply": "Envie o pedido por texto ou audio.",
+            "state": "collecting",
+            "sales_representative_id": representative.id,
+        }
+    now = datetime.utcnow()
+    session = db.scalar(
+        select(WhatsappOrderSession)
+        .where(
+            WhatsappOrderSession.sales_representative_id == representative.id,
+            WhatsappOrderSession.whatsapp_number == phone,
+            WhatsappOrderSession.state.in_(["collecting", "awaiting_confirmation"]),
+        )
+        .order_by(WhatsappOrderSession.id.desc())
+    )
+    if session and session.expires_at < now:
+        session.state = "expired"
+        session = None
+    normalized_message = normalize_search(message_text)
+    if any(command in normalized_message for command in ("catalogo", "tabela de preco", "tabela vigente", "lista de preco")):
+        return {
+            "reply": assistant_catalog(db, representative, settings_value, message_text),
+            "state": "catalog",
+            "sales_representative_id": representative.id,
+        }
+    if normalized_message in {"cancelar", "cancela", "cancel", "sair"}:
+        if session:
+            session.state = "cancelled"
+            db.commit()
+        return {
+            "reply": "Pedido cancelado. Pode enviar uma nova solicitacao quando quiser.",
+            "state": "cancelled",
+            "sales_representative_id": representative.id,
+        }
+    if session and session.state == "awaiting_confirmation":
+        if normalized_message in {"sim", "s", "confirmar", "confirmo", "pode criar", "ok"}:
+            order = create_order_from_assistant(db, representative, session.draft)
+            session.order_id = order.id
+            session.state = "completed"
+            db.commit()
+            db.refresh(order)
+            return {
+                "reply": f"Pedido {order.order_number} criado como rascunho no EasySales. Total R$ {Decimal(order.total_amount):.2f}.",
+                "state": "completed",
+                "sales_representative_id": representative.id,
+                "order_id": order.id,
+                "order_number": order.order_number,
+            }
+        return {
+            "reply": "Responda SIM para criar o pedido ou CANCELAR. Para alterar, cancele e envie o pedido novamente.",
+            "state": "awaiting_confirmation",
+            "sales_representative_id": representative.id,
+        }
+    try:
+        draft = build_assistant_draft(db, representative, message_text, settings_value)
+    except (HTTPException, RuntimeError, ValueError) as exc:
+        detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        return {
+            "reply": detail,
+            "state": "collecting",
+            "sales_representative_id": representative.id,
+        }
+    expires_at = now + timedelta(minutes=int(settings_value["session_timeout_minutes"]))
+    session = WhatsappOrderSession(
+        company_id=representative.company_id,
+        sales_representative_id=representative.id,
+        whatsapp_number=phone,
+        state="awaiting_confirmation",
+        draft=draft,
+        last_message=message_text,
+        expires_at=expires_at,
+    )
+    db.add(session)
+    if not settings_value.get("require_confirmation", True):
+        order = create_order_from_assistant(db, representative, draft)
+        session.order_id = order.id
+        session.state = "completed"
+        db.commit()
+        return {
+            "reply": f"Pedido {order.order_number} criado como rascunho no EasySales.",
+            "state": "completed",
+            "sales_representative_id": representative.id,
+            "order_id": order.id,
+            "order_number": order.order_number,
+        }
+    db.commit()
+    return {
+        "reply": assistant_summary(draft),
+        "state": "awaiting_confirmation",
+        "sales_representative_id": representative.id,
+    }
+
+
+@app.get("/assistant/status", tags=["Assistente WhatsApp"])
+def whatsapp_order_assistant_status(request: Request, db: Session = Depends(get_db)):
+    company_id = active_company_id(request, db)
+    settings_value = order_assistant_settings(db, company_id)
+    rows = db.execute(
+        text(
+            """
+            SELECT s.id, s.whatsapp_number, s.state, s.order_id, s.updated_at,
+                   u.name AS sales_representative_name, o.order_number
+            FROM sf_whatsapp_order_sessions s
+            JOIN sf_sales_representatives sr ON sr.id = s.sales_representative_id
+            JOIN users u ON u.id = sr.user_id
+            LEFT JOIN sf_sales_orders o ON o.id = s.order_id
+            WHERE s.company_id = :company_id
+            ORDER BY s.id DESC
+            LIMIT 20
+            """
+        ),
+        {"company_id": company_id},
+    ).mappings().all()
+    return {
+        "enabled": settings_value["enabled"],
+        "provider": settings_value["provider"],
+        "model": settings_value["model"],
+        "require_confirmation": settings_value["require_confirmation"],
+        "create_as_draft": settings_value["create_as_draft"],
+        "default_payment_days": settings_value["default_payment_days"],
+        "price_table_id": settings_value["price_table_id"],
+        "api_configured": bool(settings_value.get("api_key")),
+        "sales_endpoint": "/assistant/whatsapp/messages",
+        "n8n_webhook": settings_value.get("n8n_webhook_url"),
+        "evolution_instance": settings_value.get("evolution_instance"),
+        "sessions": [dict(row) for row in rows],
+    }
+
+
 @app.get("/customers", response_model=list[CustomerRead], tags=["Clientes"])
 def list_customers(request: Request, db: Session = Depends(get_db)):
     company_id = active_company_id(request, db)
@@ -1584,6 +2996,7 @@ def list_customers(request: Request, db: Session = Depends(get_db)):
             "state_code": item.state_code,
             "active": item.active,
             "company_ids": company_ids_for_person(db, item.source, str(item.id)),
+            **customer_representative_fields(db, company_id, item.source, str(item.id)),
         }
         for item in local_links
     ]
@@ -1598,8 +3011,8 @@ def list_customers(request: Request, db: Session = Depends(get_db)):
                         AND pc.person_external_id = CAST(people.id AS VARCHAR)
                         AND pc.company_id = :company_id
                         AND pc.active = TRUE
-                    WHERE is_customer = TRUE AND active = TRUE
-                    ORDER BY name ASC
+                    WHERE people.is_customer = TRUE AND people.active = TRUE
+                    ORDER BY people.name ASC
                     """
                 ),
                 {"company_id": company_id},
@@ -1622,6 +3035,7 @@ def list_customers(request: Request, db: Session = Depends(get_db)):
                 "state_code": row["state_code"],
                 "active": row["active"],
                 "company_ids": company_ids_for_person(db, "easyfinance", str(row["id"])),
+                **customer_representative_fields(db, company_id, "easyfinance", str(row["id"])),
             }
             for row in rows
         ]
@@ -1677,11 +3091,12 @@ def create_customer(payload: CustomerCreate, request: Request, db: Session = Dep
         "state_code": item.state_code,
         "active": item.active,
         "company_ids": company_ids_for_person(db, item.source, str(item.id)),
+        **customer_representative_fields(db, company_id, item.source, str(item.id)),
     }
 
 
 @app.put("/customers/{customer_id}", response_model=CustomerRead, tags=["Clientes"])
-def update_customer(customer_id: int, payload: CustomerUpdate, db: Session = Depends(get_db)):
+def update_customer(customer_id: int, payload: CustomerUpdate, request: Request, db: Session = Depends(get_db)):
     item = db.get(CustomerLink, customer_id)
     if not item or item.source != "local":
         raise HTTPException(status_code=404, detail="Cliente local nao encontrado")
@@ -1710,6 +3125,9 @@ def update_customer(customer_id: int, payload: CustomerUpdate, db: Session = Dep
         "state_code": item.state_code,
         "active": item.active,
         "company_ids": company_ids_for_person(db, item.source, str(item.id)),
+        **customer_representative_fields(
+            db, active_company_id(request, db), item.source, str(item.id)
+        ),
     }
 
 
@@ -2555,8 +3973,16 @@ def create_order(payload: SalesOrderCreate, request: Request, db: Session = Depe
     customer = resolve_customer(db, payload.customer_id)
     if not person_available_for_company(db, company_id, customer["source"], customer["external_id"]):
         raise HTTPException(status_code=400, detail="Cliente nao vinculado a empresa ativa")
+    representative = resolve_order_representative(
+        db,
+        company_id,
+        customer["source"],
+        customer["external_id"],
+        payload.sales_representative_id,
+    )
     order = SalesOrder(
         company_id=company_id,
+        sales_representative_id=representative.id if representative else None,
         order_number=next_order_number(db),
         order_type=normalize_order_type(payload.order_type),
         customer_source=customer["source"],
@@ -2641,9 +4067,17 @@ def update_order(order_id: int, payload: SalesOrderUpdate, request: Request, db:
     customer = resolve_customer(db, payload.customer_id)
     if not person_available_for_company(db, company_id, customer["source"], customer["external_id"]):
         raise HTTPException(status_code=400, detail="Cliente nao vinculado a empresa ativa")
+    representative = resolve_order_representative(
+        db,
+        company_id,
+        customer["source"],
+        customer["external_id"],
+        payload.sales_representative_id,
+    )
     existing_items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id).order_by(SalesOrderItem.id.asc())).all()
     has_linked_items = any(linked_quantity_for_order_item(db, item.id) > 0 for item in existing_items)
     order.customer_source = customer["source"]
+    order.sales_representative_id = representative.id if representative else None
     order.order_type = normalize_order_type(payload.order_type)
     order.customer_external_id = customer["external_id"]
     order.customer_name = customer["name"]
@@ -2885,3 +4319,5 @@ def delete_order(order_id: int, request: Request, db: Session = Depends(get_db))
     db.delete(order)
     db.commit()
     return {"ok": True}
+    LoginRequest,
+    LoginResponse,

@@ -1,10 +1,21 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
+from sqlalchemy import Boolean, Date, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
+
+
+class AccessGroup(Base):
+    __tablename__ = "access_groups"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    permissions: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    fixed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 
 class ProductGroup(Base):
@@ -57,6 +68,93 @@ class PersonCompany(Base):
     person_source: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     person_external_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    email: Mapped[str] = mapped_column(String(180), unique=True, index=True, nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[str] = mapped_column(String(40), nullable=False, default="user")
+    group_id: Mapped[int | None] = mapped_column(ForeignKey("access_groups.id"), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class Person(Base):
+    __tablename__ = "people"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+
+
+class SalesRepresentative(Base):
+    __tablename__ = "sf_sales_representatives"
+    __table_args__ = (
+        UniqueConstraint("company_id", "user_id", name="uq_sf_sales_representative_company_user"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("control_companies.id"), nullable=False, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    code: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    whatsapp_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=False, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class SalesRepresentativeCustomer(Base):
+    __tablename__ = "sf_sales_representative_customers"
+    __table_args__ = (
+        UniqueConstraint(
+            "company_id",
+            "customer_source",
+            "customer_external_id",
+            name="uq_sf_sales_representative_customer",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("control_companies.id"), nullable=False, index=True)
+    sales_representative_id: Mapped[int] = mapped_column(
+        ForeignKey("sf_sales_representatives.id"), nullable=False, index=True
+    )
+    customer_person_id: Mapped[int | None] = mapped_column(ForeignKey("people.id"), nullable=True, index=True)
+    customer_link_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sf_customer_links.id"), nullable=True, index=True
+    )
+    customer_source: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    customer_external_id: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ModuleSetting(Base):
+    __tablename__ = "control_module_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("control_companies.id"), nullable=False, index=True)
+    module_code: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    settings: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+
+class WhatsappOrderSession(Base):
+    __tablename__ = "sf_whatsapp_order_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
+    company_id: Mapped[int] = mapped_column(ForeignKey("control_companies.id"), nullable=False, index=True)
+    sales_representative_id: Mapped[int] = mapped_column(ForeignKey("sf_sales_representatives.id"), nullable=False, index=True)
+    whatsapp_number: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    state: Mapped[str] = mapped_column(String(30), nullable=False, default="collecting")
+    draft: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    last_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    order_id: Mapped[int | None] = mapped_column(ForeignKey("sf_sales_orders.id"), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -188,6 +286,9 @@ class SalesOrder(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True)
     company_id: Mapped[int | None] = mapped_column(ForeignKey("control_companies.id"), nullable=True, index=True)
+    sales_representative_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sf_sales_representatives.id"), nullable=True, index=True
+    )
     order_number: Mapped[str] = mapped_column(String(40), unique=True, index=True, nullable=False)
     order_type: Mapped[str] = mapped_column(String(20), nullable=False, default="sale")
     operation_type_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)

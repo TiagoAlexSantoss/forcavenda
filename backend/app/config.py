@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     )
     frontend_origin: str = Field("http://127.0.0.1:5190", alias="FRONTEND_ORIGIN")
     customer_provider: str = Field("easyfinance", alias="CUSTOMER_PROVIDER")
+    jwt_secret: str = Field("change-me-in-production", alias="JWT_SECRET")
+    access_token_expire_minutes: int = Field(480, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
 
     class Config:
         env_file = ".env"
@@ -20,4 +22,3 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
-

@@ -4,6 +4,27 @@ from decimal import Decimal
 from pydantic import BaseModel, Field
 
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AuthUserRead(BaseModel):
+    id: int
+    name: str
+    email: str
+    role: str
+    group_id: int | None = None
+    permissions: dict[str, list[str]] = Field(default_factory=dict)
+    company_ids: list[int] = Field(default_factory=list)
+
+
+class LoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    user: AuthUserRead
+
+
 class ProductGroupBase(BaseModel):
     code: str
     name: str
@@ -141,6 +162,8 @@ class CustomerRead(BaseModel):
     state_code: str | None = None
     active: bool = True
     company_ids: list[int] = Field(default_factory=list)
+    sales_representative_id: int | None = None
+    sales_representative_name: str | None = None
 
 
 class CompanyRead(BaseModel):
@@ -154,6 +177,93 @@ class CompanyRead(BaseModel):
 
 class CompanyLinkUpdate(BaseModel):
     company_ids: list[int] = Field(default_factory=list)
+
+
+class UserOptionRead(BaseModel):
+    id: int
+    name: str
+    email: str
+    active: bool = True
+
+
+class SalesRepresentativeBase(BaseModel):
+    user_id: int
+    code: str | None = None
+    whatsapp_number: str
+    active: bool = True
+
+
+class SalesRepresentativeCreate(SalesRepresentativeBase):
+    customer_ids: list[str] | None = None
+
+
+class SalesRepresentativeUpdate(SalesRepresentativeCreate):
+    pass
+
+
+class SalesRepresentativeRead(SalesRepresentativeBase):
+    id: int
+    company_id: int
+    user_name: str
+    user_email: str
+    customer_ids: list[str] = Field(default_factory=list)
+    customer_count: int = 0
+
+
+class SalesRepresentativeAssign(BaseModel):
+    sales_representative_id: int | None = None
+
+
+class SalesRepresentativeCustomersUpdate(BaseModel):
+    customer_ids: list[str] = Field(default_factory=list)
+
+
+class SalesRepresentativeCustomerAssign(BaseModel):
+    customer_id: str
+
+
+class SalesRepresentativeCustomerRow(BaseModel):
+    assignment_id: int | None = None
+    customer_id: str
+    customer_source: str
+    customer_external_id: str
+    customer_code: str
+    customer_name: str
+    document_number: str | None = None
+    city: str | None = None
+    state_code: str | None = None
+    sales_representative_id: int | None = None
+    sales_representative_code: str | None = None
+    sales_representative_name: str | None = None
+
+
+class SalesRepresentativeCustomerPage(BaseModel):
+    items: list[SalesRepresentativeCustomerRow] = Field(default_factory=list)
+    page: int
+    page_size: int
+    total: int
+    total_pages: int
+
+
+class SalesRepresentativeWhatsappContext(BaseModel):
+    sales_representative: SalesRepresentativeRead
+    customers: list[CustomerRead] = Field(default_factory=list)
+
+
+class WhatsappAssistantMessage(BaseModel):
+    whatsapp_number: str
+    text: str = ""
+    message_id: str | None = None
+    audio_base64: str | None = None
+    audio_mime_type: str | None = None
+
+
+class WhatsappAssistantResponse(BaseModel):
+    reply: str
+    state: str
+    sales_representative_id: int | None = None
+    order_id: int | None = None
+    order_number: str | None = None
 
 
 class CustomerBase(BaseModel):
@@ -341,6 +451,7 @@ class SalesOrderItemCancel(BaseModel):
 
 class SalesOrderCreate(BaseModel):
     customer_id: str
+    sales_representative_id: int | None = None
     price_table_id: int
     order_type: str = "sale"
     order_date: date
@@ -420,6 +531,9 @@ class SalesOrderRead(BaseModel):
     customer_source: str
     customer_external_id: str
     customer_name: str
+    sales_representative_id: int | None = None
+    sales_representative_name: str | None = None
+    sales_representative_whatsapp: str | None = None
     price_table_id: int
     price_table_name: str | None = None
     order_date: date

@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useContext, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, CreditCard, Edit3, HelpCircle, Home, Layers3, Menu, Moon, Package, Plus, RefreshCcw, Send, Sun, Tags, Trash2, Users, X, XCircle } from "lucide-react";
+import { Bot, Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, CreditCard, Edit3, Filter, HelpCircle, Home, Layers3, LockKeyhole, LogOut, Mail, Menu, Moon, Package, Plus, RefreshCcw, Search, Send, Sun, Tags, Trash2, Users, X, XCircle } from "lucide-react";
 import api from "./services/api";
 import "./styles.css";
 
@@ -8,6 +8,22 @@ const today = new Date().toISOString().slice(0, 10);
 const money = new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" });
 const decimal = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 4 });
 const percent = new Intl.NumberFormat("pt-BR", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const BrowserDefinitionsContext = React.createContext([]);
+const GlobalSearchContext = React.createContext("");
+
+const TAB_ACCESS = {
+  products: "sales_products",
+  priceTables: "sales_price_tables",
+  groups: "sales_product_groups",
+  classes: "sales_product_classes",
+  customers: "sales_customers",
+  customerProfiles: "sales_customer_profiles",
+  salesRepresentatives: "sales_representatives",
+  orders: "sales_orders",
+  customerManagement: "sales_customer_management",
+  approvals: "sales_approvals",
+  orderAssistant: "sales_order_assistant",
+};
 
 const emptyCustomer = { customer_profile_id: "", name: "", document_number: "", email: "", phone: "", city: "", state_code: "", active: true };
 const emptyCustomerProfile = { code: "", name: "", description: "", max_inactive_days: "180", max_overdue_days: "0", block_without_movement: false, block_overdue_titles: true, active: true, payment_rules: [] };
@@ -18,7 +34,8 @@ const emptyProduct = { product_group_id: "", product_class_id: "", sku: "", name
 const emptyPriceTable = { code: "", name: "", correction_mode: "outside", monthly_rate: "0.00", base_date: today, active: true };
 const emptyPriceItem = { product_id: "", base_price: "0.00", margin_percent: "5.00", active: true };
 const emptyPriceTier = { min_quantity: "1.00", discount_percent: "0.00", active: true };
-const emptyOrder = { customer_id: "", price_table_id: "", order_type: "sale", order_date: today, payment_due_date: today, delivery_date: "", notes: "" };
+const emptyOrder = { customer_id: "", sales_representative_id: "", price_table_id: "", order_type: "sale", order_date: today, payment_due_date: today, delivery_date: "", notes: "" };
+const emptySalesRepresentative = { user_id: "", code: "", whatsapp_number: "", active: true, customer_ids: [] };
 const emptyOrderItem = { product_id: "", warehouse_id: "", quantity: "1", negotiated_unit_price: "" };
 const emptyPaymentSuggestion = { payment_method: "avista", due_date: today, amount: "0.00", notes: "" };
 
@@ -44,7 +61,39 @@ function errorMessage(error, fallback = MESSAGES.operationFailed) {
   return createMessage(MESSAGE_TYPES.error, error?.response?.data?.detail || error?.message || fallback);
 }
 
+function readStoredUser() {
+  if (!localStorage.getItem("easysales_token")) return null;
+  try {
+    return JSON.parse(localStorage.getItem("easysales_user") || "null");
+  } catch {
+    return null;
+  }
+}
+
+function LoginPage({ onLogin, message, loading }) {
+  const [form, setForm] = useState({ email: localStorage.getItem("easysales_last_email") || "", password: "" });
+  return (
+    <main className="login-page">
+      <section className="login-panel">
+        <div className="brand-mark"><Package size={30} /></div>
+        <p className="eyebrow">Operacao comercial integrada</p>
+        <h1>EasySales</h1>
+        <p className="lead">Pedidos, carteira, precos e autorizacoes com acesso centralizado.</p>
+        {message && <div className={`message ${message.type}`}>{message.text}</div>}
+        <form className="login-form" onSubmit={(event) => { event.preventDefault(); onLogin(form); }}>
+          <label><span>E-mail</span><div className="input-wrap"><Mail size={18} /><input type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} autoComplete="username" required /></div></label>
+          <label><span>Senha</span><div className="input-wrap"><LockKeyhole size={18} /><input type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} autoComplete="current-password" required /></div></label>
+          <button type="submit" disabled={loading}>{loading ? "Entrando..." : "Entrar no EasySales"}</button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
 function App() {
+  const [currentUser, setCurrentUser] = useState(() => readStoredUser());
+  const [loginMessage, setLoginMessage] = useState(null);
+  const [loginLoading, setLoginLoading] = useState(false);
   const [activeTab, setActiveTab] = useState("home");
   const [theme, setTheme] = useState(() => localStorage.getItem("easysales-theme") || "light");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -54,6 +103,8 @@ function App() {
   const [activeCompanyId, setActiveCompanyId] = useState(() => localStorage.getItem("easy-active-company-id") || "");
   const [toasts, setToasts] = useState([]);
   const [customers, setCustomers] = useState([]);
+  const [salesRepresentatives, setSalesRepresentatives] = useState([]);
+  const [userOptions, setUserOptions] = useState([]);
   const [customerProfiles, setCustomerProfiles] = useState([]);
   const [groups, setGroups] = useState([]);
   const [classes, setClasses] = useState([]);
@@ -64,10 +115,25 @@ function App() {
   const [balances, setBalances] = useState([]);
   const [movements, setMovements] = useState([]);
   const [customerMonitoring, setCustomerMonitoring] = useState([]);
+  const [assistantStatus, setAssistantStatus] = useState(null);
+  const [controlBrowsers, setControlBrowsers] = useState([]);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
 
   useEffect(() => {
-    loadAll();
+    if (!currentUser) return;
+    api.get("/auth/me")
+      .then((response) => {
+        setCurrentUser(response.data);
+        localStorage.setItem("easysales_user", JSON.stringify(response.data));
+      })
+      .catch(logout);
   }, []);
+
+  useEffect(() => {
+    if (currentUser) loadAll();
+  }, [currentUser?.id, JSON.stringify(currentUser?.permissions || {})]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -76,20 +142,26 @@ function App() {
 
   async function loadAll() {
     try {
-      const [healthRes, companiesRes, customersRes, monitoringRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes, warehousesRes, balancesRes, movementsRes] = await Promise.all([
+      const empty = { data: [] };
+      const fetchIf = (allowed, path) => allowed ? api.get(path) : Promise.resolve(empty);
+      const [healthRes, companiesRes, customersRes, representativesRes, usersRes, monitoringRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes, warehousesRes, balancesRes, movementsRes, assistantRes, browsersRes] = await Promise.all([
         api.get("/health"),
         api.get("/companies"),
-        api.get("/customers"),
-        api.get("/customer-monitoring"),
-        api.get("/customer-profiles"),
-        api.get("/product-groups"),
-        api.get("/product-classes"),
-        api.get("/products"),
-        api.get("/price-tables"),
-        api.get("/orders"),
-        api.get("/warehouses"),
-        api.get("/stock-balances"),
-        api.get("/stock-movements"),
+        fetchIf(can("sales_customers") || can("sales_orders"), "/customers"),
+        fetchIf(can("sales_representatives") || can("sales_orders"), "/sales-representatives"),
+        fetchIf(can("sales_representatives") || can("sales_orders"), "/users/options"),
+        fetchIf(can("sales_customer_management"), "/customer-monitoring"),
+        fetchIf(can("sales_customer_profiles"), "/customer-profiles"),
+        fetchIf(can("sales_product_groups"), "/product-groups"),
+        fetchIf(can("sales_product_classes"), "/product-classes"),
+        fetchIf(can("sales_products") || can("sales_orders"), "/products"),
+        fetchIf(can("sales_price_tables") || can("sales_orders"), "/price-tables"),
+        fetchIf(can("sales_orders") || can("sales_approvals"), "/orders"),
+        fetchIf(can("sales_products") || can("sales_orders"), "/warehouses"),
+        fetchIf(can("sales_products"), "/stock-balances"),
+        fetchIf(can("sales_products"), "/stock-movements"),
+        fetchIf(can("sales_order_assistant"), "/assistant/status"),
+        fetchIf(can("sales_browser_definitions"), "/control/browser-definitions"),
       ]);
       setHealth(healthRes.data);
       setCompanies(companiesRes.data);
@@ -98,6 +170,8 @@ function App() {
         setActiveCompanyId(String(companiesRes.data[0].id));
       }
       setCustomers(customersRes.data);
+      setSalesRepresentatives(representativesRes.data);
+      setUserOptions(usersRes.data);
       setCustomerMonitoring(monitoringRes.data);
       setCustomerProfiles(profilesRes.data);
       setGroups(groupsRes.data);
@@ -108,13 +182,43 @@ function App() {
       setWarehouses(warehousesRes.data);
       setBalances(balancesRes.data);
       setMovements(movementsRes.data);
+      setAssistantStatus(assistantRes.data);
+      setControlBrowsers(browsersRes.data);
     } catch (error) {
       pushToast(errorMessage(error, MESSAGES.apiUnavailable));
     }
   }
 
   function openTab(tab) {
+    if (tab !== "home" && !can(TAB_ACCESS[tab])) return;
     setActiveTab(tab);
+  }
+
+  function can(scope, action = "view") {
+    if (!scope) return true;
+    return (currentUser?.permissions?.[scope] || []).includes(action);
+  }
+
+  async function login(form) {
+    setLoginLoading(true);
+    setLoginMessage(null);
+    try {
+      const response = await api.post("/auth/login", form);
+      localStorage.setItem("easysales_token", response.data.access_token);
+      localStorage.setItem("easysales_user", JSON.stringify(response.data.user));
+      localStorage.setItem("easysales_last_email", form.email);
+      setCurrentUser(response.data.user);
+    } catch (error) {
+      setLoginMessage(errorMessage(error, "Nao foi possivel entrar."));
+    } finally {
+      setLoginLoading(false);
+    }
+  }
+
+  function logout() {
+    localStorage.removeItem("easysales_token");
+    localStorage.removeItem("easysales_user");
+    setCurrentUser(null);
   }
 
   function changeCompany(companyId) {
@@ -123,7 +227,7 @@ function App() {
     window.setTimeout(loadAll, 0);
   }
 
-  const pageMeta = {
+  const pageMetadata = {
     home: ["Visao geral", "Home"],
     products: ["Cadastros", "Produtos"],
     priceTables: ["Cadastros", "Tabelas de preco"],
@@ -131,10 +235,13 @@ function App() {
     classes: ["Cadastros", "Classes de produtos"],
     customers: ["Cadastros", "Clientes"],
     customerProfiles: ["Cadastros", "Perfis comerciais"],
+    salesRepresentatives: ["Cadastros", "Vendedores"],
     orders: ["Operacoes", "Pedidos"],
     customerManagement: ["Operacoes", "Gestao de clientes"],
     approvals: ["Operacoes", "Autorizacoes"],
-  }[activeTab] || ["EasySales", "EasySales"];
+    orderAssistant: ["Operacoes", "Assistente WhatsApp"],
+  };
+  const pageMeta = pageMetadata[activeTab] || ["EasySales", "EasySales"];
 
   async function run(action) {
     try {
@@ -157,6 +264,16 @@ function App() {
     }, 4200);
   }
 
+  if (!currentUser) return <LoginPage onLogin={login} message={loginMessage} loading={loginLoading} />;
+
+  const searchResults = searchTerm.trim()
+    ? Object.entries(pageMetadata)
+      .map(([tab, meta]) => ({ tab, section: meta[0], label: meta[1] }))
+      .filter((item) => item.tab === "home" || can(TAB_ACCESS[item.tab]))
+      .filter((item) => `${item.label} ${item.section}`.toLowerCase().includes(searchTerm.trim().toLowerCase()))
+      .slice(0, 8)
+    : [];
+
   return (
     <div className={`app-shell ${sidebarCollapsed ? "sidebar-collapsed" : ""}`}>
       <aside className="sidebar">
@@ -171,27 +288,39 @@ function App() {
 
         <NavButton active={activeTab === "home"} onClick={() => openTab("home")} icon={Home} label="Home" />
 
-        <MenuGroup title="Cadastros" open={menuOpen.cadastros} collapsed={sidebarCollapsed} onToggle={() => setMenuOpen((current) => ({ ...current, cadastros: !current.cadastros }))}>
-          <NavButton active={activeTab === "products"} onClick={() => openTab("products")} icon={Box} label="Produtos" />
-          <NavButton active={activeTab === "priceTables"} onClick={() => openTab("priceTables")} icon={Tags} label="Tabelas de preco" />
-          <NavButton active={activeTab === "groups"} onClick={() => openTab("groups")} icon={Layers3} label="Grupos" />
-          <NavButton active={activeTab === "classes"} onClick={() => openTab("classes")} icon={Layers3} label="Classes" />
-          <NavButton active={activeTab === "customers"} onClick={() => openTab("customers")} icon={Users} label="Clientes" />
-          <NavButton active={activeTab === "customerProfiles"} onClick={() => openTab("customerProfiles")} icon={Users} label="Perfis comerciais" />
-        </MenuGroup>
+        {(can("sales_products") || can("sales_price_tables") || can("sales_product_groups") || can("sales_product_classes") || can("sales_customers") || can("sales_customer_profiles") || can("sales_representatives")) && (
+          <MenuGroup title="Cadastros" open={menuOpen.cadastros} collapsed={sidebarCollapsed} onToggle={() => setMenuOpen((current) => ({ ...current, cadastros: !current.cadastros }))}>
+            {can("sales_products") && <NavButton active={activeTab === "products"} onClick={() => openTab("products")} icon={Box} label="Produtos" />}
+            {can("sales_price_tables") && <NavButton active={activeTab === "priceTables"} onClick={() => openTab("priceTables")} icon={Tags} label="Tabelas de preco" />}
+            {can("sales_product_groups") && <NavButton active={activeTab === "groups"} onClick={() => openTab("groups")} icon={Layers3} label="Grupos" />}
+            {can("sales_product_classes") && <NavButton active={activeTab === "classes"} onClick={() => openTab("classes")} icon={Layers3} label="Classes" />}
+            {can("sales_customers") && <NavButton active={activeTab === "customers"} onClick={() => openTab("customers")} icon={Users} label="Clientes" />}
+            {can("sales_customer_profiles") && <NavButton active={activeTab === "customerProfiles"} onClick={() => openTab("customerProfiles")} icon={Users} label="Perfis comerciais" />}
+            {can("sales_representatives") && <NavButton active={activeTab === "salesRepresentatives"} onClick={() => openTab("salesRepresentatives")} icon={Users} label="Vendedores" />}
+          </MenuGroup>
+        )}
 
         <MenuGroup title="Operacoes" open={menuOpen.operacoes} collapsed={sidebarCollapsed} onToggle={() => setMenuOpen((current) => ({ ...current, operacoes: !current.operacoes }))}>
-          <NavButton active={activeTab === "orders"} onClick={() => openTab("orders")} icon={ClipboardList} label="Pedidos" />
-          <NavButton active={activeTab === "customerManagement"} onClick={() => openTab("customerManagement")} icon={Users} label="Gestao clientes" />
-          <NavButton active={activeTab === "approvals"} onClick={() => openTab("approvals")} icon={CheckCircle2} label="Autorizacoes" />
+          {can("sales_orders") && <NavButton active={activeTab === "orders"} onClick={() => openTab("orders")} icon={ClipboardList} label="Pedidos" />}
+          {can("sales_customer_management") && <NavButton active={activeTab === "customerManagement"} onClick={() => openTab("customerManagement")} icon={Users} label="Gestao clientes" />}
+          {can("sales_approvals") && <NavButton active={activeTab === "approvals"} onClick={() => openTab("approvals")} icon={CheckCircle2} label="Autorizacoes" />}
+          {can("sales_order_assistant") && <NavButton active={activeTab === "orderAssistant"} onClick={() => openTab("orderAssistant")} icon={Bot} label="Assistente WhatsApp" />}
         </MenuGroup>
       </aside>
 
       <main className="workspace">
         <header className="topbar">
-          <div>
-            <p>{pageMeta[0]}</p>
-            <h1>{pageMeta[1]}</h1>
+          <div className="topbar-search">
+            <div className="search-box">
+              <Search size={18} />
+              <input value={searchTerm} onFocus={() => setSearchOpen(true)} onChange={(event) => { setSearchTerm(event.target.value); setSearchOpen(true); }} placeholder="Buscar tela, cadastro ou operacao..." />
+            </div>
+            {searchOpen && searchTerm.trim() && (
+              <div className="search-results">
+                {searchResults.map((item) => <button key={item.tab} type="button" onClick={() => { openTab(item.tab); setSearchOpen(false); setSearchTerm(""); }}><strong>{item.label}</strong><span>{item.section}</span></button>)}
+                {!searchResults.length && <span className="search-empty">Nenhuma tela encontrada.</span>}
+              </div>
+            )}
           </div>
           <div className="topbar-actions">
             <select className="company-select" value={activeCompanyId} onChange={(event) => changeCompany(event.target.value)}>
@@ -201,6 +330,14 @@ function App() {
               {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />} {theme === "dark" ? "Claro" : "Escuro"}
             </button>
             <button className="secondary-button" onClick={loadAll}><RefreshCcw size={17} /> Atualizar</button>
+            <div className="user-menu">
+              <button className="user-button" type="button" onClick={() => setUserMenuOpen((value) => !value)}>
+                <span className="avatar">{currentUser.name.slice(0, 1).toUpperCase()}</span>
+                <span><strong>{currentUser.name}</strong><small>{currentUser.email}</small></span>
+                <ChevronDown size={16} />
+              </button>
+              {userMenuOpen && <div className="user-dropdown"><button type="button" onClick={logout}><LogOut size={16} /> Sair</button></div>}
+            </div>
           </div>
         </header>
 
@@ -210,16 +347,22 @@ function App() {
           </div>
         )}
 
-        {activeTab === "home" && <HomePage orders={orders} customers={customers} products={products} priceTables={priceTables} customerMonitoring={customerMonitoring} openTab={openTab} />}
-        {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} companies={companies} run={run} />}
-        {activeTab === "priceTables" && <PriceTablesBrowser priceTables={priceTables} products={products} companies={companies} run={run} />}
-        {activeTab === "groups" && <SimpleCatalogBrowser title="Grupos de produtos" eyebrow="Cadastros" endpoint="/product-groups" items={groups} template={emptyGroup} companies={companies} companyEndpoint="/product-groups" run={run} />}
-        {activeTab === "classes" && <ClassesBrowser classes={classes} groups={groups} companies={companies} run={run} />}
-        {activeTab === "customers" && <CustomersBrowser customers={customers} customerProfiles={customerProfiles} companies={companies} run={run} />}
-        {activeTab === "customerProfiles" && <CustomerProfilesBrowser profiles={customerProfiles} run={run} />}
-        {activeTab === "orders" && <OrdersBrowser orders={orders} customers={customers} products={products} priceTables={priceTables} warehouses={warehouses} run={run} />}
-        {activeTab === "customerManagement" && <CustomerManagementPage rows={customerMonitoring} run={run} />}
-        {activeTab === "approvals" && <OrderApprovalsPage orders={orders} run={run} />}
+        <GlobalSearchContext.Provider value={activeTab === "home" ? "" : searchTerm}>
+        <BrowserDefinitionsContext.Provider value={controlBrowsers}>
+          {activeTab === "home" && <HomePage orders={orders} customers={customers} products={products} priceTables={priceTables} customerMonitoring={customerMonitoring} openTab={openTab} />}
+          {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} companies={companies} run={run} />}
+          {activeTab === "priceTables" && <PriceTablesBrowser priceTables={priceTables} products={products} companies={companies} run={run} />}
+          {activeTab === "groups" && <SimpleCatalogBrowser title="Grupos de produtos" eyebrow="Cadastros" endpoint="/product-groups" entityCode="product_groups" items={groups} template={emptyGroup} companies={companies} companyEndpoint="/product-groups" run={run} />}
+          {activeTab === "classes" && <ClassesBrowser classes={classes} groups={groups} companies={companies} run={run} />}
+          {activeTab === "customers" && <CustomersBrowser customers={customers} customerProfiles={customerProfiles} salesRepresentatives={salesRepresentatives} companies={companies} run={run} />}
+          {activeTab === "customerProfiles" && <CustomerProfilesBrowser profiles={customerProfiles} run={run} />}
+          {activeTab === "salesRepresentatives" && <SalesRepresentativesBrowser representatives={salesRepresentatives} users={userOptions} run={run} />}
+          {activeTab === "orders" && <OrdersBrowser orders={orders} customers={customers} salesRepresentatives={salesRepresentatives} products={products} priceTables={priceTables} warehouses={warehouses} run={run} />}
+          {activeTab === "customerManagement" && <CustomerManagementPage rows={customerMonitoring} run={run} />}
+          {activeTab === "approvals" && <OrderApprovalsPage orders={orders} run={run} />}
+          {activeTab === "orderAssistant" && <OrderAssistantStatusPage status={assistantStatus} />}
+        </BrowserDefinitionsContext.Provider>
+        </GlobalSearchContext.Provider>
       </main>
     </div>
   );
@@ -327,9 +470,9 @@ function lotTypeLabel(value) {
 }
 
 function ProductsBrowser({ products, groups, classes, warehouses, balances, movements, companies, run }) {
-  const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
-  const rows = useMemo(() => filterRows(products, query, ["sku", "name", "product_group_name", "product_class_name"]), [products, query]);
+  const browser = useBrowserFilters(products, ["sku", "name", "product_group_name", "product_class_name"], "products");
+  const rows = browser.rows;
 
   function toForm(item) {
     return item ? { product_group_id: item.product_group_id || "", product_class_id: item.product_class_id || "", sku: item.sku, name: item.name, unit: item.unit, purchase_price: String(item.purchase_price || "0.00"), cost_price: String(item.cost_price || "0.00"), suggested_margin_percent: String(item.suggested_margin_percent || "0.00"), sale_price: String(item.sale_price || "0.00"), default_warehouse_id: item.default_warehouse_id || "", description: item.description || "", active: item.active } : emptyProduct;
@@ -355,8 +498,8 @@ function ProductsBrowser({ products, groups, classes, warehouses, balances, move
   }
 
   return (
-    <Browser title="Produtos" eyebrow="Cadastros" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: toForm(null) })}>
-      <DataTable columns={["SKU", "Produto", "Grupo", "Local padrao", "Lote", "Ult. compra", "Custo", "Margem", "Preco sugerido", "Status", "Acoes"]} rows={rows.map((item) => [
+    <Browser title="Produtos" eyebrow="Cadastros" {...browser} onNew={() => setModal({ item: null, form: toForm(null) })}>
+      <BrowserDataTable browser={browser} items={rows} fallbackColumns={["SKU", "Produto", "Grupo", "Local padrao", "Lote", "Ult. compra", "Custo", "Margem", "Preco sugerido", "Status", "Acoes"]} fallbackRows={rows.map((item) => [
         item.sku,
         item.name,
         item.product_group_name || "-",
@@ -368,7 +511,7 @@ function ProductsBrowser({ products, groups, classes, warehouses, balances, move
         money.format(Number(item.sale_price || 0)),
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/products/${item.id}`))} />,
-      ])} />
+      ])} renderActions={(item) => <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/products/${item.id}`))} />} />
       {modal && <ProductModal state={modal} setState={setModal} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} companies={companies} run={run} onSave={save} />}
     </Browser>
   );
@@ -477,9 +620,9 @@ function ProductModal({ state, setState, groups, classes, warehouses, balances, 
 }
 
 function PriceTablesBrowser({ priceTables, products, companies, run }) {
-  const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
-  const rows = useMemo(() => filterRows(priceTables, query, ["code", "name", "correction_mode"]), [priceTables, query]);
+  const browser = useBrowserFilters(priceTables, ["code", "name", "correction_mode"], "price_tables");
+  const rows = browser.rows;
 
   function toForm(item) {
     return item ? { code: item.code, name: item.name, correction_mode: item.correction_mode, monthly_rate: String(item.monthly_rate || "0.00"), base_date: item.base_date, active: item.active } : emptyPriceTable;
@@ -492,8 +635,8 @@ function PriceTablesBrowser({ priceTables, products, companies, run }) {
   }
 
   return (
-    <Browser title="Tabelas de preco" eyebrow="Cadastros" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: toForm(null) })}>
-      <DataTable columns={["Codigo", "Nome", "Correcao", "Taxa mensal", "Data base", "Status", "Acoes"]} rows={rows.map((item) => [
+    <Browser title="Tabelas de preco" eyebrow="Cadastros" {...browser} onNew={() => setModal({ item: null, form: toForm(null) })}>
+      <BrowserDataTable browser={browser} items={rows} fallbackColumns={["Codigo", "Nome", "Correcao", "Taxa mensal", "Data base", "Status", "Acoes"]} fallbackRows={rows.map((item) => [
         item.code,
         item.name,
         item.correction_mode === "inside" ? "Por dentro" : "Por fora",
@@ -501,7 +644,7 @@ function PriceTablesBrowser({ priceTables, products, companies, run }) {
         item.base_date,
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/price-tables/${item.id}`))} />,
-      ])} />
+      ])} renderActions={(item) => <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/price-tables/${item.id}`))} />} />
 
       {modal && <PriceTableModal state={modal} setState={setModal} products={products} companies={companies} run={run} onSave={save} />}
     </Browser>
@@ -708,10 +851,10 @@ function PriceTableModal({ state, setState, products, companies, run, onSave }) 
   );
 }
 
-function SimpleCatalogBrowser({ title, eyebrow, endpoint, items, template, run, companies = [], companyEndpoint = null }) {
-  const [query, setQuery] = useState("");
+function SimpleCatalogBrowser({ title, eyebrow, endpoint, entityCode, items, template, run, companies = [], companyEndpoint = null }) {
   const [modal, setModal] = useState(null);
-  const rows = useMemo(() => filterRows(items, query, ["code", "name", "description"]), [items, query]);
+  const browser = useBrowserFilters(items, ["code", "name", "description"], entityCode);
+  const rows = browser.rows;
 
   async function save(form, item) {
     const payload = { ...form, code: form.code.trim().toUpperCase(), name: form.name.trim(), description: form.description.trim() || null };
@@ -720,14 +863,14 @@ function SimpleCatalogBrowser({ title, eyebrow, endpoint, items, template, run, 
   }
 
   return (
-    <Browser title={title} eyebrow={eyebrow} query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: template })}>
-      <DataTable columns={["Codigo", "Nome", "Descricao", "Status", "Acoes"]} rows={rows.map((item) => [
+    <Browser title={title} eyebrow={eyebrow} {...browser} onNew={() => setModal({ item: null, form: template })}>
+      <BrowserDataTable browser={browser} items={rows} fallbackColumns={["Codigo", "Nome", "Descricao", "Status", "Acoes"]} fallbackRows={rows.map((item) => [
         item.code,
         item.name,
         item.description || "-",
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: { code: item.code, name: item.name, description: item.description || "", active: item.active } })} onRemove={() => run(() => api.delete(`${endpoint}/${item.id}`))} />,
-      ])} />
+      ])} renderActions={(item) => <RowActions onEdit={() => setModal({ item, form: { code: item.code, name: item.name, description: item.description || "", active: item.active } })} onRemove={() => run(() => api.delete(`${endpoint}/${item.id}`))} />} />
       {modal && <SimpleCatalogModal title={title} state={modal} setState={setModal} onSave={save} companies={companies} companyEndpoint={companyEndpoint} run={run} />}
     </Browser>
   );
@@ -778,9 +921,9 @@ function SimpleCatalogModal({ title, state, setState, onSave, companies = [], co
 }
 
 function ClassesBrowser({ classes, groups, companies, run }) {
-  const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
-  const rows = useMemo(() => filterRows(classes, query, ["code", "name", "product_group_name", "description"]), [classes, query]);
+  const browser = useBrowserFilters(classes, ["code", "name", "product_group_name", "description"], "product_classes");
+  const rows = browser.rows;
 
   async function save(form, item) {
     const payload = { ...form, product_group_id: form.product_group_id ? Number(form.product_group_id) : null, code: form.code.trim().toUpperCase(), name: form.name.trim(), description: form.description.trim() || null };
@@ -789,15 +932,15 @@ function ClassesBrowser({ classes, groups, companies, run }) {
   }
 
   return (
-    <Browser title="Classes de produtos" eyebrow="Cadastros" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: emptyClass })}>
-      <DataTable columns={["Codigo", "Nome", "Grupo", "Descricao", "Status", "Acoes"]} rows={rows.map((item) => [
+    <Browser title="Classes de produtos" eyebrow="Cadastros" {...browser} onNew={() => setModal({ item: null, form: emptyClass })}>
+      <BrowserDataTable browser={browser} items={rows} fallbackColumns={["Codigo", "Nome", "Grupo", "Descricao", "Status", "Acoes"]} fallbackRows={rows.map((item) => [
         item.code,
         item.name,
         item.product_group_name || "-",
         item.description || "-",
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: { product_group_id: item.product_group_id || "", code: item.code, name: item.name, description: item.description || "", active: item.active } })} onRemove={() => run(() => api.delete(`/product-classes/${item.id}`))} />,
-      ])} />
+      ])} renderActions={(item) => <RowActions onEdit={() => setModal({ item, form: { product_group_id: item.product_group_id || "", code: item.code, name: item.name, description: item.description || "", active: item.active } })} onRemove={() => run(() => api.delete(`/product-classes/${item.id}`))} />} />
       {modal && <ClassModal state={modal} setState={setModal} groups={groups} companies={companies} run={run} onSave={save} />}
     </Browser>
   );
@@ -847,9 +990,9 @@ function ClassModal({ state, setState, groups, companies, run, onSave }) {
 }
 
 function CustomerProfilesBrowser({ profiles, run }) {
-  const [query, setQuery] = useState("");
   const [modal, setModal] = useState(null);
-  const rows = useMemo(() => filterRows(profiles, query, ["code", "name", "description"]), [profiles, query]);
+  const browser = useBrowserFilters(profiles, ["code", "name", "description"], "customer_profiles");
+  const rows = browser.rows;
 
   function toForm(item) {
     return item ? {
@@ -892,8 +1035,8 @@ function CustomerProfilesBrowser({ profiles, run }) {
   }
 
   return (
-    <Browser title="Perfis comerciais" eyebrow="Cadastros" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: toForm(null) })}>
-      <DataTable columns={["Codigo", "Nome", "Dias sem mov.", "Titulos vencidos", "Cond. pgto.", "Bloqueios", "Status", "Acoes"]} rows={rows.map((item) => [
+    <Browser title="Perfis comerciais" eyebrow="Cadastros" {...browser} onNew={() => setModal({ item: null, form: toForm(null) })}>
+      <BrowserDataTable browser={browser} items={rows} fallbackColumns={["Codigo", "Nome", "Dias sem mov.", "Titulos vencidos", "Cond. pgto.", "Bloqueios", "Status", "Acoes"]} fallbackRows={rows.map((item) => [
         item.code,
         item.name,
         item.max_inactive_days,
@@ -902,7 +1045,7 @@ function CustomerProfilesBrowser({ profiles, run }) {
         [item.block_without_movement && "Sem mov.", item.block_overdue_titles && "Vencidos"].filter(Boolean).join(" / ") || "-",
         <Status active={item.active} />,
         <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/customer-profiles/${item.id}`))} />,
-      ])} />
+      ])} renderActions={(item) => <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/customer-profiles/${item.id}`))} />} />
       {modal && <CustomerProfileModal state={modal} setState={setModal} onSave={save} />}
     </Browser>
   );
@@ -952,10 +1095,241 @@ function CustomerProfileModal({ state, setState, onSave }) {
   );
 }
 
-function CustomersBrowser({ customers, customerProfiles, companies, run }) {
-  const [query, setQuery] = useState("");
+function SalesRepresentativesBrowser({ representatives, users, run }) {
   const [modal, setModal] = useState(null);
-  const rows = useMemo(() => filterRows(customers, query, ["name", "document_number", "email", "phone", "city", "customer_profile_name"]), [customers, query]);
+  const browser = useBrowserFilters(representatives, ["user_name", "user_email", "code", "whatsapp_number"], "sales_representatives");
+  const rows = browser.rows;
+
+  function toForm(item) {
+    return item ? {
+      user_id: item.user_id || "",
+      code: item.code || "",
+      whatsapp_number: item.whatsapp_number || "",
+      active: item.active,
+    } : { ...emptySalesRepresentative };
+  }
+
+  async function save(form, item) {
+    const payload = {
+      user_id: Number(form.user_id),
+      code: form.code.trim() || null,
+      whatsapp_number: form.whatsapp_number.trim(),
+      active: form.active,
+    };
+    const saved = await run(() => item
+      ? api.put(`/sales-representatives/${item.id}`, payload)
+      : api.post("/sales-representatives", payload));
+    if (saved) setModal(null);
+  }
+
+  return (
+    <Browser title="Vendedores" eyebrow="Cadastros" {...browser} onNew={() => setModal({ item: null, form: toForm(null) })}>
+      <BrowserDataTable browser={browser} items={rows} fallbackColumns={["Vendedor", "Codigo", "WhatsApp", "Clientes", "Status", "Acoes"]} fallbackRows={rows.map((item) => [
+        <span><strong>{item.user_name}</strong><small className="muted-inline">{item.user_email}</small></span>,
+        item.code || "-",
+        item.whatsapp_number,
+        item.customer_count,
+        <Status active={item.active} />,
+        <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/sales-representatives/${item.id}`))} />,
+      ])} renderActions={(item) => <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/sales-representatives/${item.id}`))} />} />
+      {modal && (
+        <SalesRepresentativeModal
+          state={modal}
+          setState={setModal}
+          users={users}
+          onSave={save}
+        />
+      )}
+    </Browser>
+  );
+}
+
+function SalesRepresentativeModal({ state, setState, users, onSave }) {
+  const { item, form } = state;
+  const [activeTab, setActiveTab] = useState("data");
+  const update = (field, value) => setState({ ...state, form: { ...form, [field]: value } });
+
+  return (
+    <Modal title={item ? "Editar vendedor" : "Novo vendedor"} onClose={() => setState(null)} onSubmit={() => onSave(form, item)}>
+      <div className="tabs">
+        <button type="button" className={activeTab === "data" ? "active" : ""} onClick={() => setActiveTab("data")}>Dados</button>
+        <button type="button" className={activeTab === "portfolio" ? "active" : ""} onClick={() => setActiveTab("portfolio")} disabled={!item}>Carteira</button>
+      </div>
+      {activeTab === "data" && (
+        <div className="modal-grid">
+          <Field label="Usuario" wide><Select required value={form.user_id} onChange={(value) => update("user_id", value)} options={users} empty="Selecione" labelKey="name" /></Field>
+          <Field label="Codigo"><input value={form.code} onChange={(event) => update("code", event.target.value.toUpperCase())} /></Field>
+          <Field label="WhatsApp"><input required inputMode="tel" placeholder="5546999999999" value={form.whatsapp_number} onChange={(event) => update("whatsapp_number", event.target.value)} /></Field>
+          <Check label="Vendedor ativo" checked={form.active} onChange={(value) => update("active", value)} />
+        </div>
+      )}
+      {activeTab === "portfolio" && (
+        <SalesRepresentativePortfolio representative={item} />
+      )}
+    </Modal>
+  );
+}
+
+function SalesRepresentativePortfolio({ representative }) {
+  const [search, setSearch] = useState("");
+  const [available, setAvailable] = useState([]);
+  const [selectedCustomerId, setSelectedCustomerId] = useState("");
+  const [searching, setSearching] = useState(false);
+  const [portfolioQuery, setPortfolioQuery] = useState("");
+  const [portfolio, setPortfolio] = useState({ items: [], page: 1, total: 0, total_pages: 1 });
+  const [loadingPortfolio, setLoadingPortfolio] = useState(false);
+  const [message, setMessage] = useState("");
+
+  async function loadPortfolio(page = 1, query = portfolioQuery) {
+    setLoadingPortfolio(true);
+    try {
+      const response = await api.get(`/sales-representatives/${representative.id}/customers`, {
+        params: { page, page_size: 30, query },
+      });
+      setPortfolio(response.data);
+    } catch (error) {
+      setMessage(error?.response?.data?.detail || "Nao foi possivel carregar a carteira.");
+    } finally {
+      setLoadingPortfolio(false);
+    }
+  }
+
+  useEffect(() => {
+    const term = search.trim();
+    setSelectedCustomerId("");
+    if (term.length < 2) {
+      setAvailable([]);
+      setSearching(false);
+      return undefined;
+    }
+    setSearching(true);
+    const timer = window.setTimeout(async () => {
+      try {
+        const response = await api.get("/sales-representatives/customer-options", {
+          params: { query: term, page: 1, page_size: 20 },
+        });
+        setAvailable(response.data.items);
+      } catch (error) {
+        setMessage(error?.response?.data?.detail || "Nao foi possivel pesquisar clientes.");
+      } finally {
+        setSearching(false);
+      }
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [search, representative.id]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => loadPortfolio(1, portfolioQuery), 300);
+    return () => window.clearTimeout(timer);
+  }, [portfolioQuery, representative.id]);
+
+  async function addCustomer() {
+    if (!selectedCustomerId) return;
+    try {
+      await api.post(`/sales-representatives/${representative.id}/customers`, {
+        customer_id: selectedCustomerId,
+      });
+      setSearch("");
+      setAvailable([]);
+      setSelectedCustomerId("");
+      setMessage("Cliente adicionado a carteira.");
+      await loadPortfolio(1, portfolioQuery);
+    } catch (error) {
+      setMessage(error?.response?.data?.detail || "Nao foi possivel adicionar o cliente.");
+    }
+  }
+
+  async function removeCustomer(row) {
+    try {
+      await api.delete(
+        `/sales-representatives/${representative.id}/customers/${row.customer_source}/${row.customer_external_id}`,
+      );
+      setMessage("Vinculo removido.");
+      const targetPage = portfolio.items.length === 1 && portfolio.page > 1 ? portfolio.page - 1 : portfolio.page;
+      await loadPortfolio(targetPage, portfolioQuery);
+    } catch (error) {
+      setMessage(error?.response?.data?.detail || "Nao foi possivel remover o vinculo.");
+    }
+  }
+
+  return (
+    <div className="portfolio-editor">
+      <section className="portfolio-add">
+        <div className="panel-header compact">
+          <div>
+            <p>Adicionar cliente</p>
+            <h3>Pesquisar cadastro</h3>
+          </div>
+        </div>
+        <div className="portfolio-add-controls">
+          <Field label="Busca">
+            <input
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Codigo, nome, documento ou cidade"
+            />
+          </Field>
+          <Field label="Cliente">
+            <select
+              value={selectedCustomerId}
+              disabled={search.trim().length < 2 || searching}
+              onChange={(event) => setSelectedCustomerId(event.target.value)}
+            >
+              <option value="">{searching ? "Pesquisando..." : "Selecione um resultado"}</option>
+              {available.map((customer) => (
+                <option value={customer.customer_id} key={customer.customer_id}>
+                  {customer.customer_code} - {customer.customer_name}
+                </option>
+              ))}
+            </select>
+          </Field>
+          <button type="button" className="primary-button" disabled={!selectedCustomerId} onClick={addCustomer}>
+            <Plus size={16} /> Adicionar
+          </button>
+        </div>
+      </section>
+
+      <section className="portfolio-links">
+        <div className="panel-header compact">
+          <div>
+            <p>Vinculos ativos</p>
+            <h3>Carteira do vendedor</h3>
+          </div>
+          <input
+            value={portfolioQuery}
+            onChange={(event) => setPortfolioQuery(event.target.value)}
+            placeholder="Filtrar carteira..."
+          />
+        </div>
+        {message && <div className="source-hint">{message}</div>}
+        <DataTable columns={["Cod. vendedor", "Cod. cliente", "Cliente", "Documento", "Cidade/UF", "Acoes"]} rows={portfolio.items.map((row) => [
+          row.sales_representative_code || `VD-${String(row.sales_representative_id).padStart(6, "0")}`,
+          row.customer_code,
+          row.customer_name,
+          row.document_number || "-",
+          [row.city, row.state_code].filter(Boolean).join(" / ") || "-",
+          <button type="button" className="icon-button" title="Remover da carteira" onClick={() => removeCustomer(row)}>
+            <Trash2 size={15} />
+          </button>,
+        ])} />
+        {loadingPortfolio && <div className="empty-detail">Carregando carteira...</div>}
+        {!loadingPortfolio && portfolio.items.length === 0 && <div className="empty-detail">Nenhum cliente vinculado.</div>}
+        <div className="portfolio-pagination">
+          <span>{portfolio.total} cliente(s) | Pagina {portfolio.page}/{portfolio.total_pages}</span>
+          <div>
+            <button type="button" className="secondary-button" disabled={portfolio.page <= 1 || loadingPortfolio} onClick={() => loadPortfolio(portfolio.page - 1)}>Anterior</button>
+            <button type="button" className="secondary-button" disabled={portfolio.page >= portfolio.total_pages || loadingPortfolio} onClick={() => loadPortfolio(portfolio.page + 1)}>Proxima</button>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function CustomersBrowser({ customers, customerProfiles, salesRepresentatives, companies, run }) {
+  const [modal, setModal] = useState(null);
+  const browser = useBrowserFilters(customers, ["name", "document_number", "email", "phone", "city", "customer_profile_name"], "customers");
+  const rows = browser.rows;
 
   function localId(item) {
     return item.id?.startsWith("local:") ? item.id.replace("local:", "") : null;
@@ -963,33 +1337,49 @@ function CustomersBrowser({ customers, customerProfiles, companies, run }) {
 
   async function save(form, item) {
     const payload = { ...form, customer_profile_id: form.customer_profile_id ? Number(form.customer_profile_id) : null, name: form.name.trim(), document_number: form.document_number || null, email: form.email || null, phone: form.phone || null, city: form.city || null, state_code: form.state_code || null };
+    delete payload.sales_representative_id;
     const id = item ? localId(item) : null;
     const saved = await run(() => {
       if (!payload.customer_profile_id) throw new Error(MESSAGES.customers.profileRequired);
       return id ? api.put(`/customers/${id}`, payload) : api.post("/customers", payload);
     });
-    if (saved) setModal(null);
+    if (!saved) return;
+    const savedCustomer = saved.data;
+    const [source, externalId] = (item?.id || savedCustomer?.id || "").split(":");
+    if (source && externalId) {
+      await run(() => api.put(`/customers/${source}/${externalId}/sales-representative`, {
+        sales_representative_id: form.sales_representative_id ? Number(form.sales_representative_id) : null,
+      }));
+    }
+    setModal(null);
   }
 
   return (
-    <Browser title="Clientes" eyebrow="Cadastros" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: emptyCustomer })}>
-      <DataTable columns={["Cliente", "Documento", "Perfil", "Limite", "Contato", "Cidade/UF", "Origem", "Status", "Acoes"]} rows={rows.map((item) => {
+    <Browser title="Clientes" eyebrow="Cadastros" {...browser} onNew={() => setModal({ item: null, form: emptyCustomer })}>
+      <BrowserDataTable browser={browser} items={rows} fallbackColumns={["Cliente", "Documento", "Perfil", "Vendedor", "Limite", "Contato", "Cidade/UF", "Origem", "Status", "Acoes"]} fallbackRows={rows.map((item) => {
         const id = localId(item);
         return [
           item.name,
           item.document_number || "-",
           item.customer_profile_name || "-",
+          item.sales_representative_name || "Sem responsavel",
           money.format(Number(item.credit_limit || 0)),
           item.email || item.phone || "-",
           [item.city, item.state_code].filter(Boolean).join(" / ") || "-",
           item.source,
           <Status active={item.active} />,
           id
-            ? <RowActions onEdit={() => setModal({ item, form: { customer_profile_id: item.customer_profile_id || "", name: item.name, document_number: item.document_number || "", email: item.email || "", phone: item.phone || "", city: item.city || "", state_code: item.state_code || "", active: item.active } })} onRemove={() => run(() => api.delete(`/customers/${id}`))} />
-            : <button type="button" className="link-button" onClick={() => setModal({ item, form: { customer_profile_id: item.customer_profile_id || "", name: item.name, document_number: item.document_number || "", email: item.email || "", phone: item.phone || "", city: item.city || "", state_code: item.state_code || "", active: item.active } })}>Perfil</button>,
+            ? <RowActions onEdit={() => setModal({ item, form: { customer_profile_id: item.customer_profile_id || "", sales_representative_id: item.sales_representative_id || "", name: item.name, document_number: item.document_number || "", email: item.email || "", phone: item.phone || "", city: item.city || "", state_code: item.state_code || "", active: item.active } })} onRemove={() => run(() => api.delete(`/customers/${id}`))} />
+            : <button type="button" className="link-button" onClick={() => setModal({ item, form: { customer_profile_id: item.customer_profile_id || "", sales_representative_id: item.sales_representative_id || "", name: item.name, document_number: item.document_number || "", email: item.email || "", phone: item.phone || "", city: item.city || "", state_code: item.state_code || "", active: item.active } })}>Perfil</button>,
         ];
-      })} />
-      {modal && <CustomerModal state={modal} setState={setModal} customerProfiles={customerProfiles} companies={companies} onSave={save} run={run} />}
+      })} renderActions={(item) => {
+        const id = localId(item);
+        const form = { customer_profile_id: item.customer_profile_id || "", sales_representative_id: item.sales_representative_id || "", name: item.name, document_number: item.document_number || "", email: item.email || "", phone: item.phone || "", city: item.city || "", state_code: item.state_code || "", active: item.active };
+        return id
+          ? <RowActions onEdit={() => setModal({ item, form })} onRemove={() => run(() => api.delete(`/customers/${id}`))} />
+          : <button type="button" className="link-button" onClick={() => setModal({ item, form })}>Perfil</button>;
+      }} />
+      {modal && <CustomerModal state={modal} setState={setModal} customerProfiles={customerProfiles} salesRepresentatives={salesRepresentatives} companies={companies} onSave={save} run={run} />}
     </Browser>
   );
 }
@@ -1070,7 +1460,49 @@ function CustomerManagementPage({ rows, run }) {
   );
 }
 
-function CustomerModal({ state, setState, customerProfiles, companies, onSave, run }) {
+function OrderAssistantStatusPage({ status }) {
+  if (!status) return <div className="empty-detail">Carregando assistente...</div>;
+  return (
+    <section className="panel">
+      <div className="browser-header">
+        <div>
+          <p>Automacao comercial</p>
+          <h2>Assistente de Pedidos via WhatsApp</h2>
+        </div>
+        <span className={`status-pill ${status.enabled ? "active" : "inactive"}`}>
+          {status.enabled ? "Ativo" : "Inativo"}
+        </span>
+      </div>
+      <div className="home-base">
+        <span><strong>{status.provider}</strong> provedor</span>
+        <span><strong>{status.model}</strong> modelo</span>
+        <span><strong>{status.api_configured ? "Configurada" : "Pendente"}</strong> chave IA</span>
+        <span><strong>{status.require_confirmation ? "Obrigatoria" : "Automatica"}</strong> confirmacao</span>
+      </div>
+      <div className="order-context">
+        <span>Entrada Sales <strong>{status.sales_endpoint}</strong></span>
+        <span>Webhook n8n <strong>{status.n8n_webhook || "-"}</strong></span>
+        <span>Evolution <strong>{status.evolution_instance || "-"}</strong></span>
+        <span>Prazo padrao <strong>{status.default_payment_days} dia(s)</strong></span>
+      </div>
+      <div className="panel-header compact">
+        <div>
+          <p>Operacao recente</p>
+          <h3>Conversas processadas</h3>
+        </div>
+      </div>
+      <DataTable columns={["Vendedor", "WhatsApp", "Estado", "Pedido", "Atualizado"]} rows={(status.sessions || []).map((row) => [
+        row.sales_representative_name,
+        row.whatsapp_number,
+        row.state,
+        row.order_number || "-",
+        row.updated_at ? new Date(row.updated_at).toLocaleString("pt-BR") : "-",
+      ])} />
+    </section>
+  );
+}
+
+function CustomerModal({ state, setState, customerProfiles, salesRepresentatives, companies, onSave, run }) {
   const { item, form } = state;
   const [activeTab, setActiveTab] = useState("data");
   const [companyIds, setCompanyIds] = useState(item?.company_ids || []);
@@ -1082,7 +1514,12 @@ function CustomerModal({ state, setState, customerProfiles, companies, onSave, r
       if (!form.customer_profile_id) throw new Error(MESSAGES.customers.profileRequired);
       return api.put(`/customers/${source}/${externalId}/profile`, { customer_profile_id: Number(form.customer_profile_id) });
     });
-    if (saved) setState(null);
+    if (saved) {
+      await run(() => api.put(`/customers/${source}/${externalId}/sales-representative`, {
+        sales_representative_id: form.sales_representative_id ? Number(form.sales_representative_id) : null,
+      }));
+      setState(null);
+    }
   }
 
   async function submit() {
@@ -1103,14 +1540,18 @@ function CustomerModal({ state, setState, customerProfiles, companies, onSave, r
       </div>
       {activeTab === "data" && (
         <div className="modal-grid">
-          <Field label="Perfil comercial" wide><Select required value={form.customer_profile_id} onChange={(v) => update("customer_profile_id", v)} options={customerProfiles} empty="Selecione" /></Field>
-          {isShared && <Field label="Limite de credito"><input disabled value={money.format(Number(item.credit_limit || 0))} /></Field>}
           <Field label="Nome" wide><input required value={form.name} onChange={(e) => update("name", e.target.value)} /></Field>
           <Field label="CPF/CNPJ"><input value={form.document_number} onChange={(e) => update("document_number", e.target.value)} /></Field>
           <Field label="E-mail"><input value={form.email} onChange={(e) => update("email", e.target.value)} /></Field>
           <Field label="Telefone"><input value={form.phone} onChange={(e) => update("phone", e.target.value)} /></Field>
           <Field label="Cidade"><input value={form.city} onChange={(e) => update("city", e.target.value)} /></Field>
           <Field label="UF"><input maxLength="2" value={form.state_code} onChange={(e) => update("state_code", e.target.value.toUpperCase())} /></Field>
+          <div className="form-section-title span-2">
+            <span>Configuracao comercial</span>
+          </div>
+          <Field label="Perfil comercial"><Select required value={form.customer_profile_id} onChange={(v) => update("customer_profile_id", v)} options={customerProfiles} empty="Selecione" /></Field>
+          <Field label="Vendedor responsavel"><Select value={form.sales_representative_id || ""} onChange={(v) => update("sales_representative_id", v)} options={salesRepresentatives.filter((representative) => representative.active)} empty="Sem responsavel" labelKey="user_name" /></Field>
+          {isShared && <Field label="Limite de credito"><input disabled value={money.format(Number(item.credit_limit || 0))} /></Field>}
           <Check label="Ativo" checked={form.active} onChange={(v) => update("active", v)} />
         </div>
       )}
@@ -1125,18 +1566,18 @@ function CustomerModal({ state, setState, customerProfiles, companies, onSave, r
   );
 }
 
-function OrdersBrowser({ orders, customers, products, priceTables, warehouses, run }) {
-  const [query, setQuery] = useState("");
+function OrdersBrowser({ orders, customers, salesRepresentatives, products, priceTables, warehouses, run }) {
   const [modal, setModal] = useState(null);
-  const rows = useMemo(() => filterRows(orders, query, ["order_number", "order_type", "customer_name", "price_table_name", "status"]), [orders, query]);
+  const browser = useBrowserFilters(orders, ["order_number", "order_type", "customer_name", "price_table_name", "status"], "orders");
+  const rows = browser.rows;
 
   function toForm(item) {
     if (!item) return emptyOrder;
-    return { customer_id: `${item.customer_source}:${item.customer_external_id}`, price_table_id: item.price_table_id || "", order_type: item.order_type || "sale", order_date: item.order_date, payment_due_date: item.payment_due_date, delivery_date: item.delivery_date || "", notes: item.notes || "" };
+    return { customer_id: `${item.customer_source}:${item.customer_external_id}`, sales_representative_id: item.sales_representative_id || "", price_table_id: item.price_table_id || "", order_type: item.order_type || "sale", order_date: item.order_date, payment_due_date: item.payment_due_date, delivery_date: item.delivery_date || "", notes: item.notes || "" };
   }
 
   async function save(form, item) {
-    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_type: form.order_type || "sale", order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: item ? item.items.map((row) => ({ product_id: row.product_id, warehouse_id: row.warehouse_id || null, quantity: row.quantity, negotiated_unit_price: row.negotiated_unit_price })) : [] };
+    const payload = { customer_id: form.customer_id, sales_representative_id: form.sales_representative_id ? Number(form.sales_representative_id) : null, price_table_id: Number(form.price_table_id), order_type: form.order_type || "sale", order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: item ? item.items.map((row) => ({ product_id: row.product_id, warehouse_id: row.warehouse_id || null, quantity: row.quantity, negotiated_unit_price: row.negotiated_unit_price })) : [] };
     const response = await run(() => item ? api.put(`/orders/${item.id}`, payload) : api.post("/orders", payload));
     if (!response) return;
     if (!response.data.payment_suggestions?.length) window.alert("Pedido salvo. Falta gerar a sugestao de pagamento.");
@@ -1144,14 +1585,15 @@ function OrdersBrowser({ orders, customers, products, priceTables, warehouses, r
   }
 
   return (
-    <Browser title="Pedidos" eyebrow="Operacoes" query={query} setQuery={setQuery} onNew={() => setModal({ item: null, form: toForm(null) })}>
+    <Browser title="Pedidos" eyebrow="Operacoes" {...browser} onNew={() => setModal({ item: null, form: toForm(null) })}>
       <OrderLegend />
-      <DataTable className="orders-table" columns={["Pedido", "Tipo", "Cliente", "Tabela", "Pedido em", "Pagamento", "Entrega", "Total", "Lucro", "Rentab.", "Status", "Acoes"]} rows={rows.map((item) => ({
+      <BrowserDataTable browser={browser} items={rows} fallbackColumns={["Pedido", "Tipo", "Cliente", "Vendedor", "Tabela", "Pedido em", "Pagamento", "Entrega", "Total", "Lucro", "Rentab.", "Status", "Acoes"]} fallbackRows={rows.map((item) => ({
         className: orderRowClassName(item),
         cells: [
           item.order_number,
           orderTypeLabel(item.order_type),
           item.customer_name,
+          item.sales_representative_name || "-",
           item.price_table_name || item.price_table_id,
           item.order_date,
           item.payment_due_date,
@@ -1162,8 +1604,8 @@ function OrdersBrowser({ orders, customers, products, priceTables, warehouses, r
           <OrderStatus status={item.status} overdue={isOrderDeliveryOverdue(item)} />,
           <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/orders/${item.id}`))} />,
         ],
-      }))} />
-      {modal && <OrderModal state={modal} setState={setModal} customers={customers} products={products} priceTables={priceTables} warehouses={warehouses} run={run} onSave={save} />}
+      }))} rowClassName={orderRowClassName} renderActions={(item) => <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/orders/${item.id}`))} />} />
+      {modal && <OrderModal state={modal} setState={setModal} customers={customers} salesRepresentatives={salesRepresentatives} products={products} priceTables={priceTables} warehouses={warehouses} run={run} onSave={save} />}
     </Browser>
   );
 }
@@ -1351,7 +1793,7 @@ function addDays(dateValue, days) {
   return date.toISOString().slice(0, 10);
 }
 
-function OrderModal({ state, setState, customers, products, priceTables, warehouses, run, onSave }) {
+function OrderModal({ state, setState, customers, salesRepresentatives, products, priceTables, warehouses, run, onSave }) {
   const { item, form } = state;
   const [currentOrder, setCurrentOrder] = useState(item);
   const [itemForm, setItemForm] = useState(emptyOrderItem);
@@ -1369,6 +1811,9 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
   const orderTotal = Number(currentOrder?.total_amount || 0);
   const paymentTotalOver = paymentTotal > orderTotal + 0.009;
   const paymentTotalMatches = Math.abs(paymentTotal - orderTotal) < 0.01;
+  const availableCustomers = form.sales_representative_id
+    ? customers.filter((customer) => Number(customer.sales_representative_id) === Number(form.sales_representative_id))
+    : customers;
 
   useEffect(() => {
     setPaymentRows(toPaymentRows(currentOrder?.payment_suggestions || []));
@@ -1388,7 +1833,7 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
   }, [form.price_table_id, itemForm.product_id, itemForm.quantity, form.payment_due_date]);
 
   async function saveHeader() {
-    const payload = { customer_id: form.customer_id, price_table_id: Number(form.price_table_id), order_type: form.order_type || "sale", order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: currentOrder?.items?.map((row) => ({ product_id: row.product_id, warehouse_id: row.warehouse_id || null, quantity: Number(row.quantity || 0), negotiated_unit_price: Number(row.negotiated_unit_price || row.corrected_unit_price || 0) })) || [] };
+    const payload = { customer_id: form.customer_id, sales_representative_id: form.sales_representative_id ? Number(form.sales_representative_id) : null, price_table_id: Number(form.price_table_id), order_type: form.order_type || "sale", order_date: form.order_date, payment_due_date: form.payment_due_date, delivery_date: form.delivery_date || null, notes: form.notes.trim() || null, items: currentOrder?.items?.map((row) => ({ product_id: row.product_id, warehouse_id: row.warehouse_id || null, quantity: Number(row.quantity || 0), negotiated_unit_price: Number(row.negotiated_unit_price || row.corrected_unit_price || 0) })) || [] };
     const response = currentOrder
       ? await api.put(`/orders/${currentOrder.id}`, payload)
       : await api.post("/orders", { ...payload, items: [] });
@@ -1525,7 +1970,8 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
   return (
     <Modal title={currentOrder ? `Editar pedido ${currentOrder.order_number}` : "Novo pedido"} onClose={() => setState(null)} onSubmit={() => onSave(form, currentOrder)}>
       <div className="modal-grid">
-        <Field label="Cliente" wide><Select value={form.customer_id} onChange={(v) => update("customer_id", v)} options={customers} empty="Selecione" required labelKey="name" valueKey="id" /></Field>
+        <Field label="Vendedor"><Select value={form.sales_representative_id || ""} onChange={(value) => setState({ ...state, form: { ...form, sales_representative_id: value, customer_id: "" } })} options={salesRepresentatives.filter((representative) => representative.active)} empty="Automatico pela carteira" labelKey="user_name" /></Field>
+        <Field label="Cliente" wide><Select value={form.customer_id} onChange={(v) => update("customer_id", v)} options={availableCustomers} empty="Selecione" required labelKey="name" valueKey="id" /></Field>
         <Field label="Tipo"><select value={form.order_type || "sale"} onChange={(event) => update("order_type", event.target.value)}><option value="sale">Pedido de venda</option><option value="purchase">Pedido de compra</option></select></Field>
         <Field label="Tabela"><Select value={form.price_table_id} onChange={(v) => update("price_table_id", v)} options={priceTables} empty="Selecione" required /></Field>
         <Field label="Prazo pagamento"><input type="date" value={form.payment_due_date} onChange={(e) => update("payment_due_date", e.target.value)} /></Field>
@@ -1550,6 +1996,7 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
             <span>Cond. pgto. <strong>{currentOrder.payment_suggestions?.length ? `${currentOrder.payment_suggestions.length} sugestao(oes)` : "Pendente"}</strong></span>
             <span>Entrega <strong>{currentOrder.delivery_date || "Nao informada"}</strong></span>
             <span>Cliente <strong>{currentOrder.customer_name}</strong></span>
+            <span>Vendedor <strong>{currentOrder.sales_representative_name || "Nao informado"}</strong></span>
           </div>
         )}
         <div className="panel-header">
@@ -1671,7 +2118,8 @@ function OrderModal({ state, setState, customers, products, priceTables, warehou
   );
 }
 
-function Browser({ title, eyebrow, query, setQuery, onNew, children }) {
+function Browser({ title, eyebrow, filters = [], setFilters, filterFields = [], browserOptions = [], selectedBrowserId, setSelectedBrowserId, onNew, children }) {
+  const selectedBrowser = browserOptions.find((item) => String(item.id) === String(selectedBrowserId));
   return (
     <section className="panel">
       <div className="browser-header">
@@ -1680,13 +2128,120 @@ function Browser({ title, eyebrow, query, setQuery, onNew, children }) {
           <h2>{title}</h2>
         </div>
         <div className="browser-actions">
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar..." />
-          <button className="primary-button" onClick={onNew}><Plus size={17} /> Novo</button>
+          {onNew && <button className="primary-button" onClick={onNew}><Plus size={17} /> Novo</button>}
         </div>
       </div>
+      {browserOptions.length > 0 && (
+        <div className="browser-query-row">
+          <label>
+            <span>Consulta</span>
+            <select value={selectedBrowserId || ""} onChange={(event) => setSelectedBrowserId?.(event.target.value)}>
+              {browserOptions.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
+            </select>
+          </label>
+          {selectedBrowser && <span className={`query-kind ${selectedBrowser.is_standard ? "standard" : "custom"}`}>{selectedBrowser.is_standard ? "Padrao" : "Personalizada"}</span>}
+        </div>
+      )}
+      {setFilters && <BrowserFilters filters={filters} setFilters={setFilters} fields={filterFields} />}
       {children}
     </section>
   );
+}
+
+function BrowserFilters({ filters, setFilters, fields }) {
+  const activeFilters = filters.length ? filters : [];
+  const appliedFilters = activeFilters.filter(hasActiveFilter);
+  const [draft, setDraft] = useState(() => emptyBrowserFilter());
+  const [editingId, setEditingId] = useState(null);
+  const draftField = fieldByName(fields, draft.field);
+  const draftOperators = operatorsForField(draftField);
+  const draftOperator = draftOperators.some((item) => item.value === draft.operator) ? draft.operator : draftOperators[0].value;
+
+  useEffect(() => {
+    setDraft(emptyBrowserFilter());
+    setEditingId(null);
+  }, [fields]);
+
+  function updateDraft(patch) {
+    setDraft((current) => {
+      const next = normalizeBrowserFilter({ ...current, ...patch }, fields);
+      if (fieldByName(fields, next.field).type === "boolean" && !String(next.value || "").trim()) {
+        next.value = "true";
+      }
+      return next;
+    });
+  }
+
+  function addFilter() {
+    const nextFilter = normalizeBrowserFilter({ ...draft, operator: draftOperator, id: editingId || draft.id }, fields);
+    if (!hasActiveFilter(nextFilter)) return;
+    const existing = activeFilters.filter(hasActiveFilter);
+    const next = editingId
+      ? existing.map((filter) => filter.id === editingId && !filter.fixed ? nextFilter : filter)
+      : [...existing, nextFilter];
+    setFilters(next.length ? next : [emptyBrowserFilter()]);
+    setDraft(emptyBrowserFilter());
+    setEditingId(null);
+  }
+
+  function removeFilter(id) {
+    const next = activeFilters.filter((filter) => filter.id !== id || filter.required || filter.fixed).filter(hasActiveFilter);
+    setFilters(next.length ? next : [emptyBrowserFilter()]);
+  }
+
+  function clearFilters() {
+    const kept = activeFilters.filter((filter) => (filter.required || filter.fixed) && hasActiveFilter(filter));
+    setFilters(kept.length ? kept : [emptyBrowserFilter()]);
+    setDraft(emptyBrowserFilter());
+    setEditingId(null);
+  }
+
+  return (
+    <div className="browser-filters">
+      <div className="browser-filter-title"><Filter size={16} /><span>Filtros</span></div>
+      <div className="browser-filter-row">
+        <select value={draft.field} onChange={(event) => updateDraft({ field: event.target.value, operator: "" })}>
+          <option value="__all__">Busca geral</option>
+          {fields.map((field) => <option key={field.name} value={field.name}>{field.label}</option>)}
+        </select>
+        <select value={draftOperator} onChange={(event) => updateDraft({ operator: event.target.value })}>
+          {draftOperators.map((operator) => <option key={operator.value} value={operator.value}>{operator.label}</option>)}
+        </select>
+        <FilterValueInput filter={draft} field={draftField} operator={draftOperator} onChange={updateDraft} />
+      </div>
+      <div className="browser-filter-actions">
+        <div className="filter-chip-list">
+          {appliedFilters.map((filter) => (
+            <span key={filter.id} className={`filter-chip ${filter.fixed ? "locked" : ""}`} onDoubleClick={() => { if (!filter.fixed) { setDraft({ ...filter }); setEditingId(filter.id); } }}>
+              {filterTagLabel(filter, fields)}
+              {!filter.fixed && !filter.required && <button type="button" onClick={() => removeFilter(filter.id)} title="Remover filtro"><X size={13} /></button>}
+            </span>
+          ))}
+        </div>
+        <div className="browser-filter-buttons">
+          {editingId && <button type="button" className="secondary-button" onClick={() => { setDraft(emptyBrowserFilter()); setEditingId(null); }}>Cancelar</button>}
+          <button type="button" className="secondary-button" disabled={!hasActiveFilter({ ...draft, operator: draftOperator })} onClick={addFilter}><Plus size={16} /> {editingId ? "Atualizar" : "Filtro"}</button>
+          <button type="button" className="secondary-button" onClick={clearFilters}>Limpar</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FilterValueInput({ filter, field, operator, onChange }) {
+  if (operator === "is_empty" || operator === "is_not_empty") return <div className="filter-empty-value">Sem valor</div>;
+  if (operator === "between") {
+    return (
+      <div className="filter-between">
+        <input type={inputTypeForField(field)} value={filter.value || ""} onChange={(event) => onChange({ value: event.target.value })} placeholder="Inicial" />
+        <input type={inputTypeForField(field)} value={filter.valueTo || ""} onChange={(event) => onChange({ valueTo: event.target.value })} placeholder="Final" />
+      </div>
+    );
+  }
+  if (field?.type === "boolean") {
+    return <select value={filter.value || "true"} onChange={(event) => onChange({ value: event.target.value })}><option value="true">Sim</option><option value="false">Nao</option></select>;
+  }
+  return <input type={inputTypeForField(field)} value={filter.value || ""} onChange={(event) => onChange({ value: event.target.value })} placeholder="Valor" />;
 }
 
 function Modal({ title, onClose, onSubmit, children }) {
@@ -1841,12 +2396,18 @@ function healthStatusLabel(status) {
 }
 
 function DataTable({ columns, rows, className = "" }) {
+  const [sort, setSort] = useState({ index: null, direction: null });
+  const sortedRows = useMemo(() => sortTableRows(rows, sort), [rows, sort]);
   return (
     <div className="table-wrap">
       <table className={className}>
-        <thead><tr>{columns.map((column) => <th key={column}>{column}</th>)}</tr></thead>
+        <thead><tr>{columns.map((column, index) => {
+          const definition = tableColumnDefinition(column);
+          const active = sort.index === index ? sort.direction : null;
+          return <th key={`${definition.label}-${index}`} className={definition.sortable ? `sortable-column ${active || ""}` : ""}><button type="button" disabled={!definition.sortable} onClick={() => setSort(nextTableSort(sort, index))}>{definition.label}{definition.sortable && <span className="sort-indicator">{active === "asc" ? "↑" : active === "desc" ? "↓" : "↕"}</span>}</button></th>;
+        })}</tr></thead>
         <tbody>
-          {rows.map((row, index) => {
+          {sortedRows.map((row, index) => {
             const cells = Array.isArray(row) ? row : row.cells;
             return <tr key={index} className={Array.isArray(row) ? "" : row.className}>{cells.map((cell, cellIndex) => <td key={cellIndex}>{cell}</td>)}</tr>;
           })}
@@ -1857,10 +2418,292 @@ function DataTable({ columns, rows, className = "" }) {
   );
 }
 
+function BrowserDataTable({ browser, items, fallbackColumns, fallbackRows, renderActions, rowClassName }) {
+  const fields = browser.selectedBrowser?.columns || [];
+  if (!fields.length) return <DataTable columns={fallbackColumns} rows={fallbackRows} />;
+  return (
+    <DataTable
+      className={browser.selectedBrowser?.entity_code === "orders" ? "orders-table" : ""}
+      columns={[...fields.map((field) => ({ label: field.label || browserFieldLabel(field.name), sortable: field.sortable !== false })), ...(renderActions ? [{ label: "Acoes", sortable: false }] : [])]}
+      rows={items.map((item) => ({
+        className: rowClassName?.(item) || "",
+        cells: [
+          ...fields.map((field) => browserCellValue(item, field)),
+          ...(renderActions ? [renderActions(item)] : []),
+        ],
+      }))}
+    />
+  );
+}
+
+function tableColumnDefinition(column) {
+  if (typeof column === "object") return { label: column.label, sortable: column.sortable !== false };
+  return { label: column, sortable: String(column).toLowerCase() !== "acoes" };
+}
+
+function nextTableSort(current, index) {
+  if (current.index !== index) return { index, direction: "asc" };
+  if (current.direction === "asc") return { index, direction: "desc" };
+  if (current.direction === "desc") return { index: null, direction: null };
+  return { index, direction: "asc" };
+}
+
+function sortTableRows(rows, sort) {
+  if (sort.index === null || !sort.direction) return rows;
+  return rows.map((row, index) => ({ row, index })).sort((left, right) => {
+    const leftCells = Array.isArray(left.row) ? left.row : left.row.cells;
+    const rightCells = Array.isArray(right.row) ? right.row : right.row.cells;
+    const compared = compareTableValues(tableCellSortValue(leftCells[sort.index]), tableCellSortValue(rightCells[sort.index]));
+    return compared ? compared * (sort.direction === "asc" ? 1 : -1) : left.index - right.index;
+  }).map((item) => item.row);
+}
+
+function tableCellSortValue(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  if (Array.isArray(value)) return value.map(tableCellSortValue).join(" ");
+  if (value?.props?.active !== undefined) return value.props.active ? "ativo" : "inativo";
+  if (value?.props?.status !== undefined) return value.props.status;
+  if (value?.props?.children !== undefined) return tableCellSortValue(value.props.children);
+  return String(value);
+}
+
+function compareTableValues(left, right) {
+  const leftText = String(left ?? "").trim();
+  const rightText = String(right ?? "").trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(leftText) && /^\d{4}-\d{2}-\d{2}/.test(rightText)) return leftText.localeCompare(rightText);
+  const parseNumber = (value) => Number(value.replace(/[^\d,.-]/g, "").replace(/\.(?=\d{3}(?:\D|$))/g, "").replace(",", "."));
+  const leftNumber = parseNumber(leftText);
+  const rightNumber = parseNumber(rightText);
+  if (leftText && rightText && Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber - rightNumber;
+  return leftText.localeCompare(rightText, "pt-BR", { numeric: true, sensitivity: "base" });
+}
+
+function browserCellValue(item, field) {
+  const value = item?.[field.name];
+  if (field.name === "active") return <Status active={Boolean(value)} />;
+  if (field.name === "status") return <OrderStatus status={value} overdue={isOrderDeliveryOverdue(item)} />;
+  if (field.name === "order_type") return orderTypeLabel(value);
+  if (field.name === "correction_mode") return value === "inside" ? "Por dentro" : "Por fora";
+  if (value === null || value === undefined || value === "") return "-";
+  if (field.type === "boolean") return value ? "Sim" : "Nao";
+  if (field.type === "date") return String(value).slice(0, 10);
+  if (field.type === "number") {
+    if (field.name.includes("amount") || field.name.includes("price") || field.name.includes("cost")) return money.format(Number(value || 0));
+    if (field.name.includes("percent") || field.name.includes("margin") || field.name.includes("rate")) return `${percent.format(Number(value || 0))}%`;
+    return decimal.format(Number(value || 0));
+  }
+  return String(value);
+}
+
+function useBrowserFilters(items, priorityFields = [], entityCode = null) {
+  const definitions = useContext(BrowserDefinitionsContext);
+  const globalSearch = useContext(GlobalSearchContext);
+  const [filters, setFilters] = useState(() => [emptyBrowserFilter()]);
+  const [selectedBrowserId, setSelectedBrowserId] = useState("");
+  const priorityKey = priorityFields.join("|");
+  const browserOptions = useMemo(
+    () => entityCode ? definitions.filter((browser) => browser.entity_code === entityCode) : [],
+    [definitions, entityCode],
+  );
+  useEffect(() => {
+    if (browserOptions.length && !browserOptions.some((browser) => String(browser.id) === String(selectedBrowserId))) {
+      const standard = browserOptions.find((browser) => browser.is_standard) || browserOptions[0];
+      setSelectedBrowserId(String(standard.id));
+    }
+  }, [browserOptions, selectedBrowserId]);
+  const selectedBrowser = useMemo(
+    () => browserOptions.find((browser) => String(browser.id) === String(selectedBrowserId)) || browserOptions[0] || null,
+    [browserOptions, selectedBrowserId],
+  );
+  useEffect(() => {
+    setFilters(defaultFiltersForBrowser(selectedBrowser).visible);
+  }, [selectedBrowser?.id]);
+  const filterFields = useMemo(
+    () => buildBrowserFilterFields(items, priorityFields, selectedBrowser),
+    [items, priorityKey, selectedBrowser],
+  );
+  const hiddenFilters = useMemo(() => defaultFiltersForBrowser(selectedBrowser).hidden, [selectedBrowser?.id]);
+  const rows = useMemo(() => {
+    const filtered = filterRows(items, [...filters, ...hiddenFilters], filterFields);
+    const term = globalSearch.trim().toLowerCase();
+    if (!term) return filtered;
+    return filtered.filter((item) => filterFields.some((field) => String(item?.[field.name] ?? "").toLowerCase().includes(term)));
+  }, [items, filters, hiddenFilters, filterFields, globalSearch]);
+  return { rows, filters, setFilters, filterFields, browserOptions, selectedBrowserId: selectedBrowser?.id || "", setSelectedBrowserId, selectedBrowser };
+}
+
+function defaultFiltersForBrowser(browser) {
+  const configured = (browser?.filters || []).filter((filter) => filter.behavior !== "disabled");
+  const visible = configured.filter((filter) => filter.behavior !== "fixed_hidden").map(browserFilterFromDefinition);
+  const hidden = configured.filter((filter) => filter.behavior === "fixed_hidden").map(browserFilterFromDefinition);
+  return { visible: visible.length ? visible : [emptyBrowserFilter()], hidden };
+}
+
+function browserFilterFromDefinition(filter) {
+  return {
+    id: browserFilterId(),
+    field: filter.field || "__all__",
+    operator: filter.operator || "equals",
+    value: resolveFilterToken(filter.value, filter.valueKind),
+    valueTo: resolveFilterToken(filter.valueTo, filter.valueKind),
+    fixed: filter.behavior === "fixed_visible",
+    required: Boolean(filter.required),
+  };
+}
+
+function resolveFilterToken(value, valueKind) {
+  if (!value) return "";
+  const raw = String(value);
+  if (valueKind === "fixed" && !raw.startsWith(":")) return raw;
+  const current = new Date();
+  const year = current.getFullYear();
+  const month = current.getMonth();
+  const dateText = (date) => date.toISOString().slice(0, 10);
+  return ({
+    ":TODAY": dateText(current),
+    ":START_OF_YEAR": `${year}-01-01`,
+    ":END_OF_YEAR": `${year}-12-31`,
+    ":START_OF_MONTH": dateText(new Date(year, month, 1)),
+    ":END_OF_MONTH": dateText(new Date(year, month + 1, 0)),
+    ":ACTIVE_COMPANY_ID": localStorage.getItem("easy-active-company-id") || "",
+  })[raw] ?? raw;
+}
+
+function emptyBrowserFilter() {
+  return { id: browserFilterId(), field: "__all__", operator: "contains", value: "", valueTo: "" };
+}
+
+function browserFilterId() {
+  if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+  return `filter-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function buildBrowserFilterFields(items, priorityFields, selectedBrowser) {
+  if (selectedBrowser?.columns?.length) {
+    return selectedBrowser.columns.filter((field) => field.filterable !== false).map((field) => ({
+      name: field.name,
+      label: field.label || browserFieldLabel(field.name),
+      type: field.type || inferBrowserFieldType(items, field.name),
+    }));
+  }
+  const names = new Set(priorityFields);
+  items.forEach((item) => Object.entries(item || {}).forEach(([key, value]) => {
+    if (!Array.isArray(value) && typeof value !== "object") names.add(key);
+  }));
+  return Array.from(names).map((name) => ({ name, label: browserFieldLabel(name), type: inferBrowserFieldType(items, name) }));
+}
+
+function browserFieldLabel(name) {
+  const labels = {
+    active: "Status", base_date: "Data-base", code: "Codigo", customer_count: "Clientes",
+    customer_name: "Cliente", customer_profile_name: "Perfil", delivery_date: "Entrega",
+    document_number: "CPF/CNPJ", gross_profit_amount: "Lucro", monthly_rate: "Taxa mensal",
+    name: "Nome", order_date: "Pedido em", order_number: "Pedido", order_type: "Tipo",
+    payment_due_date: "Pagamento", price_table_name: "Tabela", profitability_percent: "Rentabilidade",
+    sale_price: "Preco sugerido", sales_representative_name: "Vendedor", sku: "SKU",
+    status: "Status", total_amount: "Total", user_name: "Vendedor", whatsapp_number: "WhatsApp",
+  };
+  return labels[name] || name.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function inferBrowserFieldType(items, fieldName) {
+  const sample = items.map((item) => item?.[fieldName]).find((value) => value !== null && value !== undefined && value !== "");
+  if (typeof sample === "boolean") return "boolean";
+  if (typeof sample === "number") return "number";
+  if (typeof sample === "string" && /^\d{4}-\d{2}-\d{2}/.test(sample)) return "date";
+  if (sample !== undefined && sample !== null && sample !== "" && !Number.isNaN(Number(sample)) && !String(sample).startsWith("0")) return "number";
+  return "text";
+}
+
+function fieldByName(fields, name) {
+  if (name === "__all__") return { name, label: "Busca geral", type: "text" };
+  return fields.find((field) => field.name === name) || { name, label: browserFieldLabel(name), type: "text" };
+}
+
+function operatorsForField(field) {
+  if (field?.type === "number" || field?.type === "date") return [
+    { value: "equals", label: "Igual" }, { value: "greater_than", label: "Maior" },
+    { value: "greater_or_equal", label: "Maior/igual" }, { value: "less_than", label: "Menor" },
+    { value: "less_or_equal", label: "Menor/igual" }, { value: "between", label: "Entre" },
+    { value: "is_empty", label: "Vazio" }, { value: "is_not_empty", label: "Preenchido" },
+  ];
+  if (field?.type === "boolean") return [
+    { value: "equals", label: "Igual" }, { value: "is_empty", label: "Vazio" }, { value: "is_not_empty", label: "Preenchido" },
+  ];
+  return [
+    { value: "contains", label: "Contem" }, { value: "equals", label: "Igual" },
+    { value: "starts_with", label: "Comeca" }, { value: "ends_with", label: "Termina" },
+    { value: "not_contains", label: "Nao contem" }, { value: "is_empty", label: "Vazio" },
+    { value: "is_not_empty", label: "Preenchido" },
+  ];
+}
+
+function normalizeBrowserFilter(filter, fields) {
+  const operators = operatorsForField(fieldByName(fields, filter.field));
+  return { ...filter, operator: operators.some((item) => item.value === filter.operator) ? filter.operator : operators[0].value };
+}
+
+function inputTypeForField(field) {
+  if (field?.type === "number") return "number";
+  if (field?.type === "date") return "date";
+  return "text";
+}
+
+function hasActiveFilter(filter) {
+  if (!filter) return false;
+  if (filter.operator === "is_empty" || filter.operator === "is_not_empty") return true;
+  if (filter.operator === "between") return Boolean(String(filter.value || "").trim() || String(filter.valueTo || "").trim());
+  return Boolean(String(filter.value || "").trim());
+}
+
+function filterTagLabel(filter, fields) {
+  const field = fieldByName(fields, filter.field);
+  const operator = operatorsForField(field).find((item) => item.value === filter.operator);
+  if (filter.operator === "is_empty" || filter.operator === "is_not_empty") return `${field.label} ${operator?.label}`;
+  if (filter.operator === "between") return `${field.label} entre ${filter.value || "-"} e ${filter.valueTo || "-"}`;
+  const value = field.type === "boolean" ? (String(filter.value) === "true" ? "Sim" : "Nao") : filter.value;
+  return `${field.label} ${operator?.label || filter.operator} ${value}`;
+}
+
 function filterRows(items, query, fields) {
-  const term = query.trim().toLowerCase();
-  if (!term) return items;
-  return items.filter((item) => fields.some((field) => String(item[field] || "").toLowerCase().includes(term)));
+  if (!Array.isArray(query)) {
+    const term = String(query || "").trim().toLowerCase();
+    if (!term) return items;
+    return items.filter((item) => fields.some((field) => String(item[field] || "").toLowerCase().includes(term)));
+  }
+  const activeFilters = query.filter(hasActiveFilter);
+  if (!activeFilters.length) return items;
+  return items.filter((item) => activeFilters.every((filter) => {
+    if (filter.field === "__all__") return fields.some((field) => compareBrowserValue(item[field.name], filter, { ...field, type: "text" }));
+    const field = fieldByName(fields, filter.field);
+    return compareBrowserValue(item[field.name], filter, field);
+  }));
+}
+
+function compareBrowserValue(rawValue, filter, field) {
+  const empty = rawValue === null || rawValue === undefined || rawValue === "";
+  if (filter.operator === "is_empty") return empty;
+  if (filter.operator === "is_not_empty") return !empty;
+  if (field.type === "boolean") return String(Boolean(rawValue)) === String(filter.value || "true");
+  if (field.type === "number" || field.type === "date") {
+    const value = field.type === "number" ? Number(rawValue) : String(rawValue || "").slice(0, 10);
+    const start = field.type === "number" ? Number(filter.value) : filter.value;
+    const end = field.type === "number" ? Number(filter.valueTo) : filter.valueTo;
+    if (filter.operator === "between") return (!filter.value || value >= start) && (!filter.valueTo || value <= end);
+    if (filter.operator === "greater_than") return value > start;
+    if (filter.operator === "greater_or_equal") return value >= start;
+    if (filter.operator === "less_than") return value < start;
+    if (filter.operator === "less_or_equal") return value <= start;
+    return value === start;
+  }
+  const value = String(rawValue || "").toUpperCase();
+  const term = String(filter.value || "").toUpperCase();
+  if (filter.operator === "equals") return value === term;
+  if (filter.operator === "starts_with") return value.startsWith(term);
+  if (filter.operator === "ends_with") return value.endsWith(term);
+  if (filter.operator === "not_contains") return !value.includes(term);
+  return value.includes(term);
 }
 
 function suggestedProductPrice(costPrice, marginPercent) {
