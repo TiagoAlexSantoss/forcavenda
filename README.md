@@ -109,7 +109,7 @@ cd forca-vendas\backend
 python -m venv env
 .\env\Scripts\pip install -r requirements.txt
 copy .env.example .env
-.\env\Scripts\python -m uvicorn app.main:app --reload --host 127.0.0.1 --port 8020
+.\env\Scripts\python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8020
 ```
 
 Frontend:
@@ -118,5 +118,5 @@ Frontend:
 cd forca-vendas\frontend
 npm install
 copy .env.example .env
-npm run dev -- --host 127.0.0.1 --port 5190
+npm run dev
 ```

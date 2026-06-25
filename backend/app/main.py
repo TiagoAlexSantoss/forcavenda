@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, get_db
+from app.license import router as license_router
 from app.models import (
     AccessGroup,
     Company,
@@ -114,7 +115,7 @@ SALES_PERMISSION_SCOPES = {
     "sales_browser_definitions": ["view"],
 }
 
-PUBLIC_PATHS = {"/health", "/auth/login", "/assistant/whatsapp/messages"}
+PUBLIC_PATHS = {"/health", "/auth/login", "/assistant/whatsapp/messages", "/license/local-status", "/license/sync"}
 
 SALES_ROUTE_PERMISSIONS = [
     ("sales_browser_definitions", ("/control/browser-definitions",)),
@@ -242,6 +243,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(license_router)
+
 
 @app.middleware("http")
 async def enforce_access(request: Request, call_next):
@@ -282,7 +285,7 @@ async def startup():
     Base.metadata.create_all(bind=engine)
     with engine.begin() as connection:
         connection.execute(text("CREATE TABLE IF NOT EXISTS control_companies (id SERIAL PRIMARY KEY, parent_company_id INTEGER REFERENCES control_companies(id), code VARCHAR(40) UNIQUE NOT NULL, name VARCHAR(160) NOT NULL, legal_name VARCHAR(180), document_number VARCHAR(40), company_kind VARCHAR(20) NOT NULL DEFAULT 'matrix', active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"))
-        connection.execute(text("INSERT INTO control_companies (code, name, company_kind, active) SELECT 'MATRIZ', 'Matriz', 'matrix', TRUE WHERE NOT EXISTS (SELECT 1 FROM control_companies)"))
+        connection.execute(text("INSERT INTO control_companies (code, name, company_kind, active, created_at, updated_at) SELECT 'MATRIZ', 'Matriz', 'matrix', TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP WHERE NOT EXISTS (SELECT 1 FROM control_companies)"))
         default_company_id = connection.execute(text("SELECT id FROM control_companies WHERE active = TRUE ORDER BY id LIMIT 1")).scalar()
         connection.execute(text("CREATE TABLE IF NOT EXISTS control_product_companies (id SERIAL PRIMARY KEY, company_id INTEGER NOT NULL REFERENCES control_companies(id), product_source VARCHAR(40) NOT NULL, product_external_id VARCHAR(80) NOT NULL, default_warehouse_id INTEGER, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, CONSTRAINT uq_control_product_company UNIQUE (product_source, product_external_id, company_id))"))
         connection.execute(text("ALTER TABLE control_product_companies ALTER COLUMN created_at SET DEFAULT CURRENT_TIMESTAMP"))
@@ -349,20 +352,24 @@ async def startup():
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS commercial_status VARCHAR(30) NOT NULL DEFAULT 'approved'"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS commercial_reason VARCHAR(800)"))
         connection.execute(text("ALTER TABLE sf_sales_order_items ADD COLUMN IF NOT EXISTS cancellation_status VARCHAR(30) NOT NULL DEFAULT 'active'"))
-        connection.execute(text("ALTER TABLE flow_balance_ledger ALTER COLUMN stock_movement_id DROP NOT NULL"))
         connection.execute(text("ALTER TABLE sf_sales_order_payments ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES control_companies(id)"))
         connection.execute(text("UPDATE sf_sales_order_payments SET company_id = COALESCE((SELECT o.company_id FROM sf_sales_orders o WHERE o.id = sf_sales_order_payments.order_id), :company_id) WHERE company_id IS NULL"), {"company_id": default_company_id})
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_sf_sales_order_payments_company_id ON sf_sales_order_payments (company_id)"))
-        connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES control_companies(id)"))
-        connection.execute(text("UPDATE flow_balance_ledger SET company_id = COALESCE((SELECT o.company_id FROM sf_sales_orders o WHERE CAST(o.id AS VARCHAR) = flow_balance_ledger.source_document_id AND flow_balance_ledger.source_system = 'easysales' AND flow_balance_ledger.source_document_kind = 'sales_order'), :company_id) WHERE company_id IS NULL"), {"company_id": default_company_id})
-        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_flow_balance_ledger_company_product_warehouse ON flow_balance_ledger (company_id, product_source, product_external_id, warehouse_id, balance_type_id)"))
-        connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_system VARCHAR(40)"))
-        connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_document_kind VARCHAR(40)"))
-        connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_document_id VARCHAR(80)"))
-        connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_item_id VARCHAR(80)"))
-        connection.execute(text("CREATE INDEX IF NOT EXISTS ix_flow_balance_ledger_source_item ON flow_balance_ledger (source_system, source_document_kind, source_item_id)"))
+        flow_balance_ledger_exists = connection.execute(text("SELECT to_regclass('public.flow_balance_ledger')")).scalar()
+        if flow_balance_ledger_exists:
+            connection.execute(text("ALTER TABLE flow_balance_ledger ALTER COLUMN stock_movement_id DROP NOT NULL"))
+            connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES control_companies(id)"))
+            connection.execute(text("UPDATE flow_balance_ledger SET company_id = COALESCE((SELECT o.company_id FROM sf_sales_orders o WHERE CAST(o.id AS VARCHAR) = flow_balance_ledger.source_document_id AND flow_balance_ledger.source_system = 'easysales' AND flow_balance_ledger.source_document_kind = 'sales_order'), :company_id) WHERE company_id IS NULL"), {"company_id": default_company_id})
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_flow_balance_ledger_company_product_warehouse ON flow_balance_ledger (company_id, product_source, product_external_id, warehouse_id, balance_type_id)"))
+            connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_system VARCHAR(40)"))
+            connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_document_kind VARCHAR(40)"))
+            connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_document_id VARCHAR(80)"))
+            connection.execute(text("ALTER TABLE flow_balance_ledger ADD COLUMN IF NOT EXISTS source_item_id VARCHAR(80)"))
+            connection.execute(text("CREATE INDEX IF NOT EXISTS ix_flow_balance_ledger_source_item ON flow_balance_ledger (source_system, source_document_kind, source_item_id)"))
         connection.execute(text("UPDATE sf_sales_orders SET operation_code = 'PV' WHERE order_type = 'sale' AND (operation_code IS NULL OR operation_code = '')"))
-        connection.execute(text("UPDATE sf_sales_orders o SET operation_type_id = op.id FROM flow_operation_types op WHERE op.code = 'PV' AND o.order_type = 'sale' AND o.operation_type_id IS NULL"))
+        flow_operation_types_exists = connection.execute(text("SELECT to_regclass('public.flow_operation_types')")).scalar()
+        if flow_operation_types_exists:
+            connection.execute(text("UPDATE sf_sales_orders o SET operation_type_id = op.id FROM flow_operation_types op WHERE op.code = 'PV' AND o.order_type = 'sale' AND o.operation_type_id IS NULL"))
         connection.execute(text("UPDATE sf_sales_order_items SET negotiated_unit_price = corrected_unit_price WHERE negotiated_unit_price = 0"))
         connection.execute(text("UPDATE sf_sales_order_items SET min_unit_price = ROUND(corrected_unit_price * 0.95, 2) WHERE min_unit_price = 0"))
         connection.execute(text("UPDATE sf_sales_order_items SET max_unit_price = ROUND(corrected_unit_price * 1.05, 2) WHERE max_unit_price = 0"))
@@ -783,6 +790,14 @@ def customer_representative_fields(db: Session, company_id: int, source: str, ex
 
 
 ORDER_ASSISTANT_MODULE = "sales-whatsapp-assistant"
+ASSISTANT_BOOT_MENU = (
+    "Escolha o atendimento:\n"
+    "1 - EasySales (precos, catalogo e pedidos)\n"
+    "2 - BI (dashboards e indicadores)"
+)
+ASSISTANT_SESSION_TIMEOUT_MINUTES = 10
+ASSISTANT_RESET_COMMANDS = {"menu", "inicio", "iniciar", "voltar"}
+ASSISTANT_CANCEL_COMMANDS = {"cancelar", "cancela", "cancel", "sair", "encerrar", "parar"}
 
 
 def order_assistant_settings(db: Session, company_id: int) -> dict:
@@ -801,7 +816,7 @@ def order_assistant_settings(db: Session, company_id: int) -> dict:
         "create_as_draft": True,
         "default_payment_days": 30,
         "price_table_id": None,
-        "session_timeout_minutes": 30,
+        "session_timeout_minutes": ASSISTANT_SESSION_TIMEOUT_MINUTES,
     }
     if not item:
         return defaults
@@ -1034,6 +1049,68 @@ def assistant_summary(draft: dict) -> str:
     lines.append(f"Pagamento: {'/'.join(str(days) for days in payment_terms)} dia(s)")
     lines.append("Responda SIM para criar o pedido ou CANCELAR.")
     return "\n".join(lines)
+
+
+def is_assistant_catalog_request(normalized_message: str) -> bool:
+    catalog_commands = (
+        "catalogo",
+        "lista de preco",
+        "tabela de preco",
+        "tabela vigente",
+    )
+    price_terms = (
+        "cotacao",
+        "cotar",
+        "quanto custa",
+        "preco",
+        "precos",
+        "valor",
+        "valores",
+    )
+    return any(command in normalized_message for command in catalog_commands + price_terms)
+
+
+def assistant_module_from_message(normalized_message: str) -> str | None:
+    sales_choices = {"1", "sales", "easysales", "easy sales", "vendas", "pedido", "pedidos"}
+    bi_choices = {"2", "bi", "portal bi", "dashboard", "dashboards", "indicador", "indicadores"}
+    if normalized_message in sales_choices:
+        return "sales"
+    if normalized_message in bi_choices:
+        return "bi"
+    return None
+
+
+def assistant_session_module(session: WhatsappOrderSession | None) -> str | None:
+    if session and session.state == "awaiting_confirmation":
+        return "sales"
+    return (session.draft or {}).get("selected_module") if session else None
+
+
+def save_assistant_module_session(
+    db: Session,
+    representative: SalesRepresentative,
+    phone: str,
+    selected_module: str | None,
+    message_text: str,
+    expires_at: datetime,
+    session: WhatsappOrderSession | None = None,
+) -> WhatsappOrderSession:
+    if not session:
+        session = WhatsappOrderSession(
+            company_id=representative.company_id,
+            sales_representative_id=representative.id,
+            whatsapp_number=phone,
+            state="collecting",
+            draft={},
+            expires_at=expires_at,
+        )
+        db.add(session)
+    session.state = "collecting"
+    session.draft = {"selected_module": selected_module} if selected_module else {}
+    session.last_message = message_text
+    session.expires_at = expires_at
+    db.commit()
+    return session
 
 
 def assistant_catalog(db: Session, representative: SalesRepresentative, settings_value: dict, message: str) -> str:
@@ -2856,21 +2933,65 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
     )
     if session and session.expires_at < now:
         session.state = "expired"
+        db.commit()
         session = None
     normalized_message = normalize_search(message_text)
-    if any(command in normalized_message for command in ("catalogo", "tabela de preco", "tabela vigente", "lista de preco")):
+    session_timeout_minutes = min(
+        max(int(settings_value.get("session_timeout_minutes") or ASSISTANT_SESSION_TIMEOUT_MINUTES), 1),
+        ASSISTANT_SESSION_TIMEOUT_MINUTES,
+    )
+    expires_at = now + timedelta(minutes=session_timeout_minutes)
+    if normalized_message in ASSISTANT_CANCEL_COMMANDS:
+        if session:
+            session.state = "cancelled"
+            session.draft = {}
+            session.last_message = message_text
+            session.expires_at = now
+            db.commit()
+        return {
+            "reply": "Atendimento cancelado. Quando quiser recomecar, envie MENU.",
+            "state": "cancelled",
+            "sales_representative_id": representative.id,
+        }
+    if normalized_message in ASSISTANT_RESET_COMMANDS:
+        save_assistant_module_session(db, representative, phone, None, message_text, expires_at, session)
+        return {
+            "reply": ASSISTANT_BOOT_MENU,
+            "state": "routing",
+            "sales_representative_id": representative.id,
+        }
+    selected_module = assistant_module_from_message(normalized_message)
+    current_module = assistant_session_module(session)
+    if selected_module:
+        save_assistant_module_session(db, representative, phone, selected_module, message_text, expires_at, session)
+        if selected_module == "bi":
+            return {
+                "reply": "BI selecionado. Envie sua pergunta sobre dashboards ou indicadores.",
+                "state": "bi_selected",
+                "sales_representative_id": representative.id,
+            }
+        return {
+            "reply": "EasySales selecionado. Pode pedir precos, catalogo ou enviar um pedido.",
+            "state": "sales_selected",
+            "sales_representative_id": representative.id,
+        }
+    if current_module == "bi":
+        return {
+            "reply": "BI selecionado. Vou encaminhar sua pergunta para o assistente de BI. Para voltar ao menu, envie MENU.",
+            "state": "bi_selected",
+            "sales_representative_id": representative.id,
+        }
+    if current_module != "sales":
+        save_assistant_module_session(db, representative, phone, None, message_text, expires_at, session)
+        return {
+            "reply": ASSISTANT_BOOT_MENU,
+            "state": "routing",
+            "sales_representative_id": representative.id,
+        }
+    if is_assistant_catalog_request(normalized_message):
         return {
             "reply": assistant_catalog(db, representative, settings_value, message_text),
             "state": "catalog",
-            "sales_representative_id": representative.id,
-        }
-    if normalized_message in {"cancelar", "cancela", "cancel", "sair"}:
-        if session:
-            session.state = "cancelled"
-            db.commit()
-        return {
-            "reply": "Pedido cancelado. Pode enviar uma nova solicitacao quando quiser.",
-            "state": "cancelled",
             "sales_representative_id": representative.id,
         }
     if session and session.state == "awaiting_confirmation":
@@ -2901,7 +3022,6 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
             "state": "collecting",
             "sales_representative_id": representative.id,
         }
-    expires_at = now + timedelta(minutes=int(settings_value["session_timeout_minutes"]))
     session = WhatsappOrderSession(
         company_id=representative.company_id,
         sales_representative_id=representative.id,
