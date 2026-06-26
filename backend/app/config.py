@@ -1,7 +1,11 @@
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic import Field
 from pydantic_settings import BaseSettings
+
+
+BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
@@ -20,9 +24,12 @@ class Settings(BaseSettings):
     license_gateway_fingerprint: str | None = Field(None, alias="LICENSE_GATEWAY_FINGERPRINT")
     license_environment: str = Field("production", alias="LICENSE_ENVIRONMENT")
     license_offline_grace_days: int = Field(7, alias="LICENSE_OFFLINE_GRACE_DAYS")
+    jsreport_url: str = Field("http://localhost:5488", alias="JSREPORT_URL")
+    jsreport_username: str | None = Field(None, alias="JSREPORT_USERNAME")
+    jsreport_password: str | None = Field(None, alias="JSREPORT_PASSWORD")
 
     class Config:
-        env_file = ".env"
+        env_file = str(BACKEND_DIR / ".env")
         extra = "ignore"
 
 

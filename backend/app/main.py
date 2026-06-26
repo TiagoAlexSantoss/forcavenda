@@ -10,7 +10,7 @@ from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from jose import JWTError, jwt
 from passlib.context import CryptContext
 from sqlalchemy import func, select, text
@@ -113,12 +113,14 @@ SALES_PERMISSION_SCOPES = {
     "sales_customer_management": ["view", "edit"],
     "sales_order_assistant": ["view"],
     "sales_browser_definitions": ["view"],
+    "sales_reports": ["view"],
 }
 
 PUBLIC_PATHS = {"/health", "/auth/login", "/assistant/whatsapp/messages", "/license/local-status", "/license/sync"}
 
 SALES_ROUTE_PERMISSIONS = [
     ("sales_browser_definitions", ("/control/browser-definitions",)),
+    ("sales_reports", ("/reports/menu",)),
     ("sales_order_assistant", ("/assistant/status",)),
     ("sales_representatives", ("/sales-representatives", "/users/options")),
     ("sales_customer_management", ("/customer-monitoring",)),
@@ -1141,8 +1143,12 @@ def assistant_catalog(db: Session, representative: SalesRepresentative, settings
         ]
     if not products:
         return f"Nao encontrei produtos para essa busca na tabela {table.name}."
-    due_date = date.today() + timedelta(days=int(settings_value.get("default_payment_days") or 30))
-    lines = [f"Catalogo vigente: {table.code} - {table.name}"]
+    default_payment_days = int(settings_value.get("default_payment_days") or 30)
+    due_date = date.today() + timedelta(days=default_payment_days)
+    lines = [
+        f"Catalogo vigente: {table.code} - {table.name}",
+        f"Valores corrigidos para vencimento em {default_payment_days} dia(s). Entre parenteses, preco a vista/base da tabela.",
+    ]
     for product in products[:30]:
         item = db.scalar(select(PriceTableItem).where(
             PriceTableItem.price_table_id == table.id,
@@ -1151,8 +1157,9 @@ def assistant_catalog(db: Session, representative: SalesRepresentative, settings
         ))
         if not item:
             continue
-        price = money_round(corrected_price(table, item.base_price, due_date))
-        lines.append(f"- {product['sku']} | {product['name']} | R$ {price:.2f}")
+        corrected = money_round(corrected_price(table, item.base_price, due_date))
+        base_price = money_round(item.base_price)
+        lines.append(f"- {product['sku']} | {product['name']} | R$ {corrected:.2f} (a vista/base: R$ {base_price:.2f})")
     if len(products) > 30:
         lines.append(f"Mostrando 30 de {len(products)} produtos. Envie 'catalogo' com o nome para filtrar.")
     return "\n".join(lines)
@@ -1860,6 +1867,168 @@ def order_to_read(db: Session, order: SalesOrder) -> dict:
         "authorization_reasons": order_authorization_reasons(db, order, items),
         "payment_suggestions": payment_suggestions,
         "items": items,
+    }
+
+
+def report_template_body(db: Session, code: str) -> str:
+    try:
+        template = db.execute(
+            text(
+                """
+                SELECT template_body
+                FROM control_report_definitions
+                WHERE code = :code
+                  AND active = TRUE
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ),
+            {"code": code},
+        ).scalar()
+    except SQLAlchemyError:
+        template = None
+    if not template:
+        raise HTTPException(
+            status_code=404,
+            detail="Modelo de relatorio nao encontrado. Abra o EasyControl uma vez para executar o seed de relatorios.",
+        )
+    return template
+
+
+def jsreport_request(path: str, payload: dict, timeout: int = 90) -> tuple[bytes, str]:
+    base_url = settings.jsreport_url.rstrip("/")
+    body = json.dumps(payload, default=str).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if settings.jsreport_username and settings.jsreport_password:
+        credentials = f"{settings.jsreport_username}:{settings.jsreport_password}".encode("utf-8")
+        headers["Authorization"] = f"Basic {base64.b64encode(credentials).decode('ascii')}"
+    request = UrlRequest(f"{base_url}{path}", data=body, headers=headers, method="POST")
+    try:
+        with urlopen(request, timeout=timeout) as response:
+            return response.read(), response.headers.get("content-type", "application/pdf")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")[:500]
+        raise HTTPException(status_code=502, detail=f"jsreport retornou erro {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise HTTPException(status_code=502, detail=f"jsreport indisponivel: {exc.reason}") from exc
+
+
+def format_report_date(value: date | datetime | None) -> str:
+    if not value:
+        return ""
+    return value.strftime("%d/%m/%Y")
+
+
+def format_report_money(value: Decimal | int | float | None) -> str:
+    amount = Decimal(str(value or 0)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    formatted = f"{amount:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"R$ {formatted}"
+
+
+def format_report_decimal(value: Decimal | int | float | None) -> str:
+    amount = Decimal(str(value or 0)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    text_value = f"{amount:,.4f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return text_value.rstrip("0").rstrip(",")
+
+
+def payment_method_label(value: str | None) -> str:
+    return {
+        "avista": "A vista",
+        "parcelado": "Parcelado",
+        "adiantamento": "Adiantamento",
+        "boleto": "Boleto",
+    }.get((value or "").lower(), value or "-")
+
+
+def order_status_label(value: str | None) -> str:
+    return {
+        "draft": "Rascunho",
+        "pending_financial": "Aguardando financeiro",
+        "financial_blocked": "Bloqueado financeiro",
+        "pending_commercial": "Aguardando comercial",
+        "approved": "Aprovado",
+        "rejected": "Rejeitado",
+        "cancelled": "Cancelado",
+    }.get((value or "").lower(), value or "-")
+
+
+def commercial_status_label(value: str | None) -> str:
+    return {
+        "approved": "Liberado",
+        "pending": "Pendente",
+        "rejected": "Rejeitado",
+    }.get((value or "").lower(), value or "-")
+
+
+def sales_order_report_data(db: Session, order: SalesOrder) -> dict:
+    company = db.get(Company, order.company_id) if order.company_id else None
+    customer = resolve_customer(db, f"{order.customer_source}:{order.customer_external_id}")
+    items = db.scalars(select(SalesOrderItem).where(SalesOrderItem.order_id == order.id).order_by(SalesOrderItem.id.asc())).all()
+    payments = db.scalars(
+        select(SalesOrderPayment)
+        .where(SalesOrderPayment.order_id == order.id)
+        .order_by(SalesOrderPayment.due_date.asc(), SalesOrderPayment.id.asc())
+    ).all()
+    installments = payments or [
+        SalesOrderPayment(
+            company_id=order.company_id,
+            order_id=order.id,
+            payment_method="boleto",
+            due_date=order.payment_due_date,
+            amount=order.total_amount,
+            notes=None,
+        )
+    ]
+    discount_amount = Decimal("0")
+    return {
+        "company": {
+            "initials": "".join(part[:1] for part in (company.name if company else "TAS").split()[:2]).upper() or "TAS",
+            "name": company.name if company else "TAS Consultoria",
+            "legal_name": company.legal_name if company else "",
+            "document_number": company.document_number if company else "",
+            "address": "",
+            "phone": "",
+            "email": "",
+        },
+        "order": {
+            "order_number": order.order_number,
+            "order_date": format_report_date(order.order_date),
+            "status": order_status_label(order.status),
+            "customer_name": order.customer_name,
+            "customer_document": customer.get("document_number") or "",
+            "customer_city": customer.get("city") or "",
+            "customer_state": customer.get("state_code") or "",
+            "customer_phone": customer.get("phone") or "",
+            "sales_representative_name": order_to_read(db, order).get("sales_representative_name") or "",
+            "price_table_name": db.get(PriceTable, order.price_table_id).name if db.get(PriceTable, order.price_table_id) else "",
+            "payment_terms": f"{len(installments)} parcela(s)",
+            "delivery_date": format_report_date(order.delivery_date),
+            "subtotal_amount": format_report_money(order.total_amount + discount_amount),
+            "discount_amount": format_report_money(discount_amount),
+            "freight_amount": format_report_money(0),
+            "total_amount": format_report_money(order.total_amount),
+            "notes": order.notes or "",
+        },
+        "items": [
+            {
+                "product_sku": item.product_sku,
+                "product_name": item.product_name,
+                "quantity": format_report_decimal(item.quantity),
+                "unit_price": format_report_money(item.negotiated_unit_price or item.corrected_unit_price),
+                "discount_amount": format_report_money(0),
+                "total_amount": format_report_money(item.total_amount),
+                "commercial_status": commercial_status_label(item.commercial_status),
+            }
+            for item in items
+        ],
+        "payments": [
+            {
+                "payment_method": payment_method_label(payment.payment_method),
+                "due_date": format_report_date(payment.due_date),
+                "amount": format_report_money(payment.amount),
+            }
+            for payment in installments
+        ],
     }
 
 
@@ -4082,6 +4251,60 @@ def list_orders(request: Request, db: Session = Depends(get_db)):
 def get_order(order_id: int, request: Request, db: Session = Depends(get_db)):
     order = order_for_company_or_404(db, order_id, active_company_id(request, db))
     return order_to_read(db, order)
+
+
+@app.get("/reports/menu", tags=["Relatorios"])
+def sales_reports_menu(db: Session = Depends(get_db)):
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                r.id,
+                r.code,
+                r.name,
+                COALESCE(r.menu_label, r.name) AS menu_label,
+                r.description,
+                r.source_mode,
+                r.target_screen,
+                r.output_format,
+                r.ordinal,
+                e.display_name AS entity_name,
+                b.name AS browser_name
+            FROM control_report_definitions r
+            JOIN control_metadata_entities e ON e.id = r.entity_id
+            LEFT JOIN control_browser_definitions b ON b.id = r.browser_id
+            WHERE r.active = TRUE
+              AND r.show_in_menu = TRUE
+              AND r.target_app = 'easysales'
+            ORDER BY r.ordinal ASC, COALESCE(r.menu_label, r.name) ASC
+            """
+        )
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+@app.get("/orders/{order_id}/print", tags=["Pedidos"])
+def print_order(order_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
+    template = report_template_body(db, "sales_order_pdf")
+    content, content_type = jsreport_request(
+        "/api/report",
+        {
+            "template": {
+                "content": template,
+                "engine": "handlebars",
+                "recipe": "chrome-pdf",
+                "chrome": {"printBackground": True, "format": "A4"},
+            },
+            "data": sales_order_report_data(db, order),
+        },
+    )
+    filename = f"pedido-{order.order_number}.pdf"
+    return Response(
+        content=content,
+        media_type=content_type or "application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 @app.post("/orders", response_model=SalesOrderRead, status_code=status.HTTP_201_CREATED, tags=["Pedidos"])

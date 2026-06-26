@@ -1,6 +1,6 @@
 import React, { useContext, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Bot, Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, CreditCard, Edit3, Filter, HelpCircle, Home, Layers3, LockKeyhole, LogOut, Mail, Menu, Moon, Package, Plus, RefreshCcw, Search, Send, Sun, Tags, Trash2, Users, X, XCircle } from "lucide-react";
+import { Bot, Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, CreditCard, Edit3, FileText, Filter, HelpCircle, Home, Layers3, LockKeyhole, LogOut, Mail, Menu, Moon, Package, Plus, Printer, RefreshCcw, Search, Send, Sun, Tags, Trash2, Users, X, XCircle } from "lucide-react";
 import api from "./services/api";
 import "./styles.css";
 
@@ -23,6 +23,7 @@ const TAB_ACCESS = {
   customerManagement: "sales_customer_management",
   approvals: "sales_approvals",
   orderAssistant: "sales_order_assistant",
+  reports: "sales_reports",
 };
 
 const emptyCustomer = { customer_profile_id: "", name: "", document_number: "", email: "", phone: "", city: "", state_code: "", active: true };
@@ -59,6 +60,15 @@ function createMessage(type, text) {
 
 function errorMessage(error, fallback = MESSAGES.operationFailed) {
   return createMessage(MESSAGE_TYPES.error, error?.response?.data?.detail || error?.message || fallback);
+}
+
+async function openOrderPrint(orderId) {
+  if (!orderId) return;
+  const response = await api.get(`/orders/${orderId}/print`, { responseType: "blob" });
+  const file = new Blob([response.data], { type: response.headers["content-type"] || "application/pdf" });
+  const url = URL.createObjectURL(file);
+  window.open(url, "_blank", "noopener,noreferrer");
+  window.setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
 function readStoredUser() {
@@ -116,6 +126,7 @@ function App() {
   const [movements, setMovements] = useState([]);
   const [customerMonitoring, setCustomerMonitoring] = useState([]);
   const [assistantStatus, setAssistantStatus] = useState(null);
+  const [salesReports, setSalesReports] = useState([]);
   const [controlBrowsers, setControlBrowsers] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -144,7 +155,7 @@ function App() {
     try {
       const empty = { data: [] };
       const fetchIf = (allowed, path) => allowed ? api.get(path) : Promise.resolve(empty);
-      const [healthRes, companiesRes, customersRes, representativesRes, usersRes, monitoringRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes, warehousesRes, balancesRes, movementsRes, assistantRes, browsersRes] = await Promise.all([
+      const [healthRes, companiesRes, customersRes, representativesRes, usersRes, monitoringRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes, warehousesRes, balancesRes, movementsRes, assistantRes, browsersRes, reportsRes] = await Promise.all([
         api.get("/health"),
         api.get("/companies"),
         fetchIf(can("sales_customers") || can("sales_orders"), "/customers"),
@@ -162,6 +173,7 @@ function App() {
         fetchIf(can("sales_products"), "/stock-movements"),
         fetchIf(can("sales_order_assistant"), "/assistant/status"),
         fetchIf(can("sales_browser_definitions"), "/control/browser-definitions"),
+        fetchIf(can("sales_reports"), "/reports/menu"),
       ]);
       setHealth(healthRes.data);
       setCompanies(companiesRes.data);
@@ -184,6 +196,7 @@ function App() {
       setMovements(movementsRes.data);
       setAssistantStatus(assistantRes.data);
       setControlBrowsers(browsersRes.data);
+      setSalesReports(reportsRes.data);
     } catch (error) {
       pushToast(errorMessage(error, MESSAGES.apiUnavailable));
     }
@@ -240,6 +253,7 @@ function App() {
     customerManagement: ["Operacoes", "Gestao de clientes"],
     approvals: ["Operacoes", "Autorizacoes"],
     orderAssistant: ["Operacoes", "Assistente WhatsApp"],
+    reports: ["Relatorios", "Relatorios"],
   };
   const pageMeta = pageMetadata[activeTab] || ["EasySales", "EasySales"];
 
@@ -305,6 +319,7 @@ function App() {
           {can("sales_customer_management") && <NavButton active={activeTab === "customerManagement"} onClick={() => openTab("customerManagement")} icon={Users} label="Gestao clientes" />}
           {can("sales_approvals") && <NavButton active={activeTab === "approvals"} onClick={() => openTab("approvals")} icon={CheckCircle2} label="Autorizacoes" />}
           {can("sales_order_assistant") && <NavButton active={activeTab === "orderAssistant"} onClick={() => openTab("orderAssistant")} icon={Bot} label="Assistente WhatsApp" />}
+          {can("sales_reports") && <NavButton active={activeTab === "reports"} onClick={() => openTab("reports")} icon={FileText} label="Relatorios" />}
         </MenuGroup>
       </aside>
 
@@ -361,6 +376,7 @@ function App() {
           {activeTab === "customerManagement" && <CustomerManagementPage rows={customerMonitoring} run={run} />}
           {activeTab === "approvals" && <OrderApprovalsPage orders={orders} run={run} />}
           {activeTab === "orderAssistant" && <OrderAssistantStatusPage status={assistantStatus} />}
+          {activeTab === "reports" && <SalesReportsPage reports={salesReports} openTab={openTab} />}
         </BrowserDefinitionsContext.Provider>
         </GlobalSearchContext.Provider>
       </main>
@@ -1566,6 +1582,32 @@ function CustomerModal({ state, setState, customerProfiles, salesRepresentatives
   );
 }
 
+function SalesReportsPage({ reports, openTab }) {
+  const browser = useBrowserFilters(reports, ["menu_label", "name", "entity_name", "browser_name", "target_screen", "source_mode"]);
+  return (
+    <Browser title="Relatorios" eyebrow="Publicados pelo EasyControl" {...browser}>
+      <DataTable columns={["Relatorio", "Origem", "Tela", "Formato", "Acoes"]} rows={browser.rows.map((item) => [
+        <div><strong>{item.menu_label || item.name}</strong><small className="block-muted">{item.description || item.code}</small></div>,
+        `${item.entity_name || "-"}${item.browser_name ? ` / ${item.browser_name}` : ""}`,
+        salesReportScreenLabel(item.target_screen),
+        String(item.output_format || "pdf").toUpperCase(),
+        <div className="row-actions">
+          {item.target_screen === "orders"
+            ? <button type="button" onClick={() => openTab("orders")} title="Abrir tela de pedidos"><ClipboardList size={15} /> Pedidos</button>
+            : <button type="button" disabled title="Este relatorio ainda precisa de parametros">Parametros</button>}
+        </div>,
+      ])} />
+    </Browser>
+  );
+}
+
+function salesReportScreenLabel(screen) {
+  return {
+    orders: "Pedidos",
+    reports: "Menu de relatorios",
+  }[screen] || screen || "-";
+}
+
 function OrdersBrowser({ orders, customers, salesRepresentatives, products, priceTables, warehouses, run }) {
   const [modal, setModal] = useState(null);
   const browser = useBrowserFilters(orders, ["order_number", "order_type", "customer_name", "price_table_name", "status"], "orders");
@@ -1582,6 +1624,24 @@ function OrdersBrowser({ orders, customers, salesRepresentatives, products, pric
     if (!response) return;
     if (!response.data.payment_suggestions?.length) window.alert("Pedido salvo. Falta gerar a sugestao de pagamento.");
     setModal(null);
+  }
+
+  async function printOrder(item) {
+    try {
+      await openOrderPrint(item.id);
+    } catch (error) {
+      window.alert(error?.response?.data?.detail || "Nao foi possivel imprimir o pedido.");
+    }
+  }
+
+  function orderActions(item) {
+    return (
+      <div className="row-actions">
+        <button type="button" onClick={() => printOrder(item)} title="Imprimir pedido"><Printer size={15} /></button>
+        <button type="button" onClick={() => setModal({ item, form: toForm(item) })} title="Editar"><Edit3 size={15} /></button>
+        <button type="button" onClick={() => window.confirm("Confirma a exclusao?") && run(() => api.delete(`/orders/${item.id}`))} title="Excluir"><Trash2 size={15} /></button>
+      </div>
+    );
   }
 
   return (
@@ -1602,9 +1662,9 @@ function OrdersBrowser({ orders, customers, salesRepresentatives, products, pric
           money.format(Number(item.gross_profit_amount || 0)),
           `${percent.format(Number(item.profitability_percent || 0))}%`,
           <OrderStatus status={item.status} overdue={isOrderDeliveryOverdue(item)} />,
-          <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/orders/${item.id}`))} />,
+          orderActions(item),
         ],
-      }))} rowClassName={orderRowClassName} renderActions={(item) => <RowActions onEdit={() => setModal({ item, form: toForm(item) })} onRemove={() => run(() => api.delete(`/orders/${item.id}`))} />} />
+      }))} rowClassName={orderRowClassName} renderActions={orderActions} />
       {modal && <OrderModal state={modal} setState={setModal} customers={customers} salesRepresentatives={salesRepresentatives} products={products} priceTables={priceTables} warehouses={warehouses} run={run} onSave={save} />}
     </Browser>
   );
@@ -1967,8 +2027,26 @@ function OrderModal({ state, setState, customers, salesRepresentatives, products
     setItemForm({ product_id: row.product_id || "", warehouse_id: row.warehouse_id || productDefaultWarehouse(row.product_id), quantity: String(row.quantity || "1"), negotiated_unit_price: String(row.negotiated_unit_price || row.corrected_unit_price || "") });
   }
 
+  async function printCurrentOrder() {
+    if (!currentOrder?.id) return;
+    try {
+      await openOrderPrint(currentOrder.id);
+    } catch (error) {
+      window.alert(error?.response?.data?.detail || "Nao foi possivel imprimir o pedido.");
+    }
+  }
+
   return (
-    <Modal title={currentOrder ? `Editar pedido ${currentOrder.order_number}` : "Novo pedido"} onClose={() => setState(null)} onSubmit={() => onSave(form, currentOrder)}>
+    <Modal
+      title={currentOrder ? `Editar pedido ${currentOrder.order_number}` : "Novo pedido"}
+      onClose={() => setState(null)}
+      onSubmit={() => onSave(form, currentOrder)}
+      headerActions={currentOrder?.id && (
+        <button type="button" className="icon-button" onClick={printCurrentOrder} title="Imprimir pedido">
+          <Printer size={18} />
+        </button>
+      )}
+    >
       <div className="modal-grid">
         <Field label="Vendedor"><Select value={form.sales_representative_id || ""} onChange={(value) => setState({ ...state, form: { ...form, sales_representative_id: value, customer_id: "" } })} options={salesRepresentatives.filter((representative) => representative.active)} empty="Automatico pela carteira" labelKey="user_name" /></Field>
         <Field label="Cliente" wide><Select value={form.customer_id} onChange={(v) => update("customer_id", v)} options={availableCustomers} empty="Selecione" required labelKey="name" valueKey="id" /></Field>
@@ -2244,13 +2322,16 @@ function FilterValueInput({ filter, field, operator, onChange }) {
   return <input type={inputTypeForField(field)} value={filter.value || ""} onChange={(event) => onChange({ value: event.target.value })} placeholder="Valor" />;
 }
 
-function Modal({ title, onClose, onSubmit, children }) {
+function Modal({ title, onClose, onSubmit, headerActions, children }) {
   return (
     <div className="modal-backdrop">
       <form className="modal" onSubmit={(event) => { event.preventDefault(); onSubmit(); }}>
         <header>
           <h2>{title}</h2>
-          <button type="button" className="icon-button" onClick={onClose}><X size={18} /></button>
+          <div className="modal-header-actions">
+            {headerActions}
+            <button type="button" className="icon-button" onClick={onClose}><X size={18} /></button>
+          </div>
         </header>
         {children}
         <footer>

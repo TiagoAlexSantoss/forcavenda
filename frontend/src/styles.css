@@ -1155,6 +1155,13 @@ th.sortable-column.desc {
   font-size: 13px;
 }
 
+.block-muted {
+  display: block;
+  margin-top: 3px;
+  color: #64748b;
+  font-size: 12px;
+}
+
 .row-actions {
   display: flex;
   gap: 8px;
@@ -1237,6 +1244,13 @@ th.sortable-column.desc {
 
 .modal header {
   border-bottom: 1px solid #e2e8f0;
+}
+
+.modal-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
 }
 
 .modal footer {
