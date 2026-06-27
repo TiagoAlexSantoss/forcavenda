@@ -19,6 +19,15 @@ class AuthUserRead(BaseModel):
     company_ids: list[int] = Field(default_factory=list)
 
 
+class HomePreferencesRead(BaseModel):
+    widgets: list[str] = Field(default_factory=list)
+    available_widgets: list[str] = Field(default_factory=list)
+
+
+class HomePreferencesUpdate(BaseModel):
+    widgets: list[str] = Field(default_factory=list)
+
+
 class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"

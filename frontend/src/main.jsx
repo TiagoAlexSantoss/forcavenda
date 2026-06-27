@@ -1,6 +1,6 @@
 import React, { useContext, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Bot, Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, CreditCard, Edit3, FileText, Filter, HelpCircle, Home, Layers3, LockKeyhole, LogOut, Mail, Menu, Moon, Package, Plus, Printer, RefreshCcw, Search, Send, Sun, Tags, Trash2, Users, X, XCircle } from "lucide-react";
+import { Bot, Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, CreditCard, Edit3, FileText, Filter, HelpCircle, Home, Layers3, LayoutDashboard, LockKeyhole, LogOut, Mail, Menu, Moon, Package, Plus, Printer, RefreshCcw, Search, Send, Settings2, Sun, Tags, Trash2, Users, X, XCircle } from "lucide-react";
 import api from "./services/api";
 import "./styles.css";
 
@@ -25,6 +25,15 @@ const TAB_ACCESS = {
   orderAssistant: "sales_order_assistant",
   reports: "sales_reports",
 };
+
+const HOME_WIDGET_CATALOG = [
+  { id: "quick_actions", label: "Atalhos", description: "Acesso direto as operacoes liberadas para o usuario." },
+  { id: "sales_kpis", label: "Indicadores comerciais", description: "Pendencias, entregas, clientes criticos e carteira aberta." },
+  { id: "recent_orders", label: "Pedidos recentes", description: "Ultimos pedidos com cliente, valor e situacao." },
+  { id: "order_board", label: "Fluxo de pedidos", description: "Board por etapa: rascunho, autorizacao e aprovado." },
+  { id: "customer_health", label: "Saude da carteira", description: "Clientes organizados por criticidade e atencao." },
+  { id: "commercial_base", label: "Base comercial", description: "Totais dos cadastros liberados para o usuario." },
+];
 
 const emptyCustomer = { customer_profile_id: "", name: "", document_number: "", email: "", phone: "", city: "", state_code: "", active: true };
 const emptyCustomerProfile = { code: "", name: "", description: "", max_inactive_days: "180", max_overdue_days: "0", block_without_movement: false, block_overdue_titles: true, active: true, payment_rules: [] };
@@ -106,7 +115,7 @@ function App() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [activeTab, setActiveTab] = useState("home");
   const [theme, setTheme] = useState(() => localStorage.getItem("easysales-theme") || "light");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.innerWidth <= 900);
   const [menuOpen, setMenuOpen] = useState({ cadastros: true, operacoes: true });
   const [health, setHealth] = useState(null);
   const [companies, setCompanies] = useState([]);
@@ -131,6 +140,7 @@ function App() {
   const [searchTerm, setSearchTerm] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [homePreferences, setHomePreferences] = useState({ widgets: [], available_widgets: [] });
 
   useEffect(() => {
     if (!currentUser) return;
@@ -155,9 +165,10 @@ function App() {
     try {
       const empty = { data: [] };
       const fetchIf = (allowed, path) => allowed ? api.get(path) : Promise.resolve(empty);
-      const [healthRes, companiesRes, customersRes, representativesRes, usersRes, monitoringRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes, warehousesRes, balancesRes, movementsRes, assistantRes, browsersRes, reportsRes] = await Promise.all([
+      const [healthRes, companiesRes, homeRes, customersRes, representativesRes, usersRes, monitoringRes, profilesRes, groupsRes, classesRes, productsRes, priceTablesRes, ordersRes, warehousesRes, balancesRes, movementsRes, assistantRes, browsersRes, reportsRes] = await Promise.all([
         api.get("/health"),
         api.get("/companies"),
+        api.get("/home/preferences"),
         fetchIf(can("sales_customers") || can("sales_orders"), "/customers"),
         fetchIf(can("sales_representatives") || can("sales_orders"), "/sales-representatives"),
         fetchIf(can("sales_representatives") || can("sales_orders"), "/users/options"),
@@ -177,6 +188,7 @@ function App() {
       ]);
       setHealth(healthRes.data);
       setCompanies(companiesRes.data);
+      setHomePreferences(homeRes.data);
       if (!localStorage.getItem("easy-active-company-id") && companiesRes.data[0]?.id) {
         localStorage.setItem("easy-active-company-id", String(companiesRes.data[0].id));
         setActiveCompanyId(String(companiesRes.data[0].id));
@@ -205,6 +217,7 @@ function App() {
   function openTab(tab) {
     if (tab !== "home" && !can(TAB_ACCESS[tab])) return;
     setActiveTab(tab);
+    if (window.innerWidth <= 900) setSidebarCollapsed(true);
   }
 
   function can(scope, action = "view") {
@@ -265,6 +278,18 @@ function App() {
       return result || true;
     } catch (error) {
       pushToast(errorMessage(error));
+      return false;
+    }
+  }
+
+  async function saveHomeWidgets(widgets) {
+    try {
+      const response = await api.put("/home/preferences", { widgets });
+      setHomePreferences(response.data);
+      pushToast(createMessage(MESSAGE_TYPES.success, "Home atualizada."));
+      return true;
+    } catch (error) {
+      pushToast(errorMessage(error, "Nao foi possivel salvar a home."));
       return false;
     }
   }
@@ -364,7 +389,7 @@ function App() {
 
         <GlobalSearchContext.Provider value={activeTab === "home" ? "" : searchTerm}>
         <BrowserDefinitionsContext.Provider value={controlBrowsers}>
-          {activeTab === "home" && <HomePage orders={orders} customers={customers} products={products} priceTables={priceTables} customerMonitoring={customerMonitoring} openTab={openTab} />}
+          {activeTab === "home" && <HomePage orders={orders} customers={customers} products={products} priceTables={priceTables} customerMonitoring={customerMonitoring} openTab={openTab} can={can} preferences={homePreferences} onSaveWidgets={saveHomeWidgets} />}
           {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} companies={companies} run={run} />}
           {activeTab === "priceTables" && <PriceTablesBrowser priceTables={priceTables} products={products} companies={companies} run={run} />}
           {activeTab === "groups" && <SimpleCatalogBrowser title="Grupos de produtos" eyebrow="Cadastros" endpoint="/product-groups" entityCode="product_groups" items={groups} template={emptyGroup} companies={companies} companyEndpoint="/product-groups" run={run} />}
@@ -400,7 +425,9 @@ function NavButton({ active, onClick, icon: Icon, label }) {
   return <button className={active ? "active" : ""} onClick={onClick} title={label}><Icon size={18} /> <span>{label}</span></button>;
 }
 
-function HomePage({ orders, customers, products, priceTables, customerMonitoring, openTab }) {
+function HomePage({ orders, customers, products, priceTables, customerMonitoring, openTab, can, preferences, onSaveWidgets }) {
+  const [configOpen, setConfigOpen] = useState(false);
+  const [draftWidgets, setDraftWidgets] = useState([]);
   const pendingOrders = orders.filter(isOrderInApproval);
   const overdueDeliveries = orders.filter(isOrderDeliveryOverdue);
   const approvedOrders = orders.filter((order) => order.status === "approved");
@@ -409,65 +436,186 @@ function HomePage({ orders, customers, products, priceTables, customerMonitoring
     .filter((order) => !["cancelled", "rejected"].includes(order.status))
     .reduce((total, order) => total + Number(order.total_amount || 0), 0);
   const recentOrders = orders.slice(0, 5);
+  const selectedWidgets = new Set(preferences.widgets || []);
+  const availableWidgets = HOME_WIDGET_CATALOG.filter((widget) => (preferences.available_widgets || []).includes(widget.id));
+  const shortcuts = [
+    can("sales_orders") && { tab: "orders", label: "Pedidos", detail: "Consultar e incluir", icon: ClipboardList },
+    can("sales_customer_management") && { tab: "customerManagement", label: "Gestao de clientes", detail: "Acompanhar carteira", icon: Users },
+    can("sales_approvals") && { tab: "approvals", label: "Autorizacoes", detail: `${pendingOrders.length} pendente(s)`, icon: CheckCircle2 },
+    can("sales_customers") && { tab: "customers", label: "Clientes", detail: "Cadastro comercial", icon: Users },
+    can("sales_products") && { tab: "products", label: "Produtos", detail: "Catalogo e estoque", icon: Box },
+    can("sales_price_tables") && { tab: "priceTables", label: "Tabelas de preco", detail: "Precos e margens", icon: Tags },
+    can("sales_reports") && { tab: "reports", label: "Relatorios", detail: "Consultas operacionais", icon: FileText },
+  ].filter(Boolean);
+  const kpis = [
+    can("sales_approvals") && { label: "Pedidos em autorizacao", value: pendingOrders.length, tone: "warning", tab: "approvals" },
+    can("sales_orders") && { label: "Entregas vencidas", value: overdueDeliveries.length, tone: "danger", tab: "orders" },
+    can("sales_customer_management") && { label: "Clientes criticos", value: criticalCustomers.length, tone: "danger", tab: "customerManagement" },
+    can("sales_orders") && { label: "Carteira aberta", value: money.format(openOrderTotal), tone: "success", tab: "orders" },
+  ].filter(Boolean);
+  const orderColumns = [
+    { id: "draft", label: "Rascunhos", rows: orders.filter((order) => order.status === "draft" && !isOrderInApproval(order)) },
+    { id: "approval", label: "Em autorizacao", rows: pendingOrders },
+    { id: "approved", label: "Aprovados", rows: approvedOrders },
+  ];
+  const healthColumns = [
+    { id: "critical", label: "Criticos", rows: customerMonitoring.filter((row) => row.health_status === "critical") },
+    { id: "attention", label: "Atencao", rows: customerMonitoring.filter((row) => row.health_status === "attention") },
+    { id: "healthy", label: "Saudaveis", rows: customerMonitoring.filter((row) => row.health_status === "healthy") },
+  ];
+
+  function openConfiguration() {
+    setDraftWidgets((preferences.widgets || []).filter((id) => (preferences.available_widgets || []).includes(id)));
+    setConfigOpen(true);
+  }
+
+  function toggleWidget(widgetId, checked) {
+    setDraftWidgets((current) => checked
+      ? [...current.filter((id) => id !== widgetId), widgetId]
+      : current.filter((id) => id !== widgetId));
+  }
+
+  async function saveConfiguration() {
+    if (await onSaveWidgets(draftWidgets)) setConfigOpen(false);
+  }
 
   return (
     <div className="home-layout">
-      <section className="home-hero">
+      <header className="home-toolbar">
         <div>
-          <p>EasySales</p>
-          <h2>Operacao comercial em tempo real</h2>
-          <span>Pedidos, autorizacoes, entregas e carteira de clientes no mesmo lugar.</span>
+          <p>Visao geral</p>
+          <h2>Meu painel</h2>
         </div>
-        <div className="home-actions">
-          <button className="primary-button" onClick={() => openTab("orders")}><ClipboardList size={17} /> Pedidos</button>
-          <button className="secondary-button" onClick={() => openTab("approvals")}><CheckCircle2 size={17} /> Autorizar</button>
-        </div>
-      </section>
+        <button className="secondary-button" type="button" onClick={openConfiguration}><Settings2 size={17} /> Configurar</button>
+      </header>
 
-      <section className="home-kpis">
-        <HomeCard label="Pedidos em autorizacao" value={pendingOrders.length} tone="warning" onClick={() => openTab("approvals")} />
-        <HomeCard label="Entregas vencidas" value={overdueDeliveries.length} tone="danger" onClick={() => openTab("orders")} />
-        <HomeCard label="Clientes criticos" value={criticalCustomers.length} tone="danger" onClick={() => openTab("customerManagement")} />
-        <HomeCard label="Carteira aberta" value={money.format(openOrderTotal)} tone="success" onClick={() => openTab("orders")} />
-      </section>
-
-      <section className="home-grid">
-        <article className="home-panel">
-          <div className="panel-header compact">
-            <div>
-              <p>Operacoes</p>
-              <h2>Pedidos recentes</h2>
-            </div>
+      {selectedWidgets.has("quick_actions") && shortcuts.length > 0 && (
+        <section className="home-widget">
+          <HomeWidgetHeader eyebrow="Navegacao" title="Atalhos" />
+          <div className="home-shortcuts">
+            {shortcuts.map(({ tab, label, detail, icon: Icon }) => (
+              <button key={tab} type="button" onClick={() => openTab(tab)}>
+                <Icon size={19} />
+                <span><strong>{label}</strong><small>{detail}</small></span>
+                <ChevronRight size={17} />
+              </button>
+            ))}
           </div>
+        </section>
+      )}
+
+      {selectedWidgets.has("sales_kpis") && kpis.length > 0 && (
+        <section className="home-widget">
+          <HomeWidgetHeader eyebrow="Agora" title="Indicadores comerciais" />
+          <div className="home-kpis">
+            {kpis.map((kpi) => <HomeCard key={kpi.label} label={kpi.label} value={kpi.value} tone={kpi.tone} onClick={() => openTab(kpi.tab)} />)}
+          </div>
+        </section>
+      )}
+
+      {selectedWidgets.has("recent_orders") && (
+        <section className="home-widget">
+          <HomeWidgetHeader eyebrow="Operacoes" title="Pedidos recentes" action={() => openTab("orders")} />
           <div className="home-list">
             {recentOrders.map((order) => (
               <button key={order.id} type="button" onClick={() => openTab("orders")}>
                 <span>
                   <strong>{order.order_number}</strong>
-                  <small>{order.customer_name}</small>
+                  <small>{order.customer_name} · {money.format(Number(order.total_amount || 0))}</small>
                 </span>
                 <OrderStatus status={order.status} overdue={isOrderDeliveryOverdue(order)} />
               </button>
             ))}
             {recentOrders.length === 0 && <div className="empty-detail">Nenhum pedido cadastrado.</div>}
           </div>
-        </article>
+        </section>
+      )}
 
-        <article className="home-panel">
-          <div className="panel-header compact">
-            <div>
-              <p>Cadastros</p>
-              <h2>Base comercial</h2>
-            </div>
+      {selectedWidgets.has("order_board") && (
+        <section className="home-widget">
+          <HomeWidgetHeader eyebrow="Operacoes" title="Fluxo de pedidos" action={() => openTab("orders")} />
+          <div className="home-board">
+            {orderColumns.map((column) => (
+              <div className={`home-board-column ${column.id}`} key={column.id}>
+                <header><strong>{column.label}</strong><span>{column.rows.length}</span></header>
+                <div>
+                  {column.rows.slice(0, 5).map((order) => (
+                    <button className="home-order-card" key={order.id} type="button" onClick={() => openTab("orders")}>
+                      <span><strong>{order.order_number}</strong><small>{order.customer_name}</small></span>
+                      <b>{money.format(Number(order.total_amount || 0))}</b>
+                    </button>
+                  ))}
+                  {column.rows.length === 0 && <span className="home-board-empty">Nenhum pedido</span>}
+                </div>
+              </div>
+            ))}
           </div>
+        </section>
+      )}
+
+      {selectedWidgets.has("customer_health") && (
+        <section className="home-widget">
+          <HomeWidgetHeader eyebrow="Carteira" title="Saude dos clientes" action={() => openTab("customerManagement")} />
+          <div className="home-board customer-board">
+            {healthColumns.map((column) => (
+              <div className={`home-board-column ${column.id}`} key={column.id}>
+                <header><strong>{column.label}</strong><span>{column.rows.length}</span></header>
+                <div>
+                  {column.rows.slice(0, 4).map((row) => (
+                    <button className="home-customer-card" key={row.customer_id} type="button" onClick={() => openTab("customerManagement")}>
+                      <strong>{row.customer_name}</strong>
+                      <span>{row.days_without_movement ?? "-"} dias sem movimento</span>
+                    </button>
+                  ))}
+                  {column.rows.length === 0 && <span className="home-board-empty">Nenhum cliente</span>}
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {selectedWidgets.has("commercial_base") && (
+        <section className="home-widget">
+          <HomeWidgetHeader eyebrow="Cadastros" title="Base comercial" />
           <div className="home-base">
-            <span><strong>{customers.length}</strong> clientes</span>
-            <span><strong>{products.length}</strong> produtos</span>
-            <span><strong>{priceTables.length}</strong> tabelas</span>
-            <span><strong>{approvedOrders.length}</strong> pedidos autorizados</span>
+            {can("sales_customers") && <span><strong>{customers.length}</strong> clientes</span>}
+            {can("sales_products") && <span><strong>{products.length}</strong> produtos</span>}
+            {can("sales_price_tables") && <span><strong>{priceTables.length}</strong> tabelas</span>}
+            {can("sales_orders") && <span><strong>{approvedOrders.length}</strong> pedidos autorizados</span>}
           </div>
-        </article>
-      </section>
+        </section>
+      )}
+
+      {selectedWidgets.size === 0 && (
+        <div className="home-empty">
+          <LayoutDashboard size={28} />
+          <strong>Seu painel esta vazio</strong>
+          <button className="primary-button" type="button" onClick={openConfiguration}><Settings2 size={17} /> Configurar</button>
+        </div>
+      )}
+
+      {configOpen && (
+        <Modal title="Configurar home" onClose={() => setConfigOpen(false)} onSubmit={saveConfiguration}>
+          <div className="home-widget-picker">
+            {availableWidgets.map((widget) => (
+              <label key={widget.id} className={draftWidgets.includes(widget.id) ? "selected" : ""}>
+                <input type="checkbox" checked={draftWidgets.includes(widget.id)} onChange={(event) => toggleWidget(widget.id, event.target.checked)} />
+                <span><strong>{widget.label}</strong><small>{widget.description}</small></span>
+              </label>
+            ))}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+function HomeWidgetHeader({ eyebrow, title, action }) {
+  return (
+    <div className="home-widget-header">
+      <div><p>{eyebrow}</p><h2>{title}</h2></div>
+      {action && <button type="button" className="icon-button" onClick={action} title={`Abrir ${title}`}><ChevronRight size={18} /></button>}
     </div>
   );
 }

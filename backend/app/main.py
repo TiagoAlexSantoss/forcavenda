@@ -39,6 +39,7 @@ from app.models import (
     SalesRepresentative,
     SalesRepresentativeCustomer,
     User,
+    UserHomePreference,
     WhatsappOrderSession,
 )
 from app.schemas import (
@@ -53,6 +54,8 @@ from app.schemas import (
     CustomerProfileUpdate,
     CustomerRead,
     CustomerUpdate,
+    HomePreferencesRead,
+    HomePreferencesUpdate,
     LoginRequest,
     LoginResponse,
     PricePreviewRead,
@@ -116,6 +119,16 @@ SALES_PERMISSION_SCOPES = {
     "sales_reports": ["view"],
 }
 
+HOME_WIDGET_SCOPES = {
+    "quick_actions": (),
+    "sales_kpis": ("sales_orders", "sales_approvals", "sales_customer_management"),
+    "recent_orders": ("sales_orders",),
+    "order_board": ("sales_orders",),
+    "customer_health": ("sales_customer_management",),
+    "commercial_base": ("sales_customers", "sales_products", "sales_price_tables"),
+}
+DEFAULT_HOME_WIDGETS = list(HOME_WIDGET_SCOPES)
+
 PUBLIC_PATHS = {"/health", "/auth/login", "/assistant/whatsapp/messages", "/license/local-status", "/license/sync"}
 
 SALES_ROUTE_PERMISSIONS = [
@@ -164,6 +177,25 @@ def user_permissions(db: Session, user: User) -> dict[str, list[str]]:
     }
 
 
+def available_home_widgets(db: Session, user: User) -> list[str]:
+    permissions = user_permissions(db, user)
+    view_scopes = {scope for scope, actions in permissions.items() if "view" in actions}
+    available = []
+    for widget_id, scopes in HOME_WIDGET_SCOPES.items():
+        if widget_id == "quick_actions":
+            allowed = bool(view_scopes)
+        else:
+            allowed = any(scope in view_scopes for scope in scopes)
+        if allowed:
+            available.append(widget_id)
+    return available
+
+
+def sanitize_home_widgets(widget_ids: list[str], available: list[str]) -> list[str]:
+    allowed = set(available)
+    return list(dict.fromkeys(widget_id for widget_id in widget_ids if widget_id in allowed))
+
+
 def user_company_ids(db: Session, user: User) -> list[int]:
     if user.role == "admin":
         return list(db.scalars(select(Company.id).where(Company.active == True)).all())
@@ -198,7 +230,7 @@ def user_from_authorization(db: Session, authorization: str | None) -> User | No
 def route_permission(path: str, method: str) -> tuple[str, str] | None:
     if method == "OPTIONS" or path in PUBLIC_PATHS or path.startswith(("/docs", "/openapi", "/redoc")):
         return None
-    if path in {"/auth/me", "/companies"}:
+    if path in {"/auth/me", "/companies", "/home/preferences"}:
         return None
     action = {"GET": "view", "POST": "create", "PUT": "edit", "PATCH": "edit", "DELETE": "delete"}.get(method)
     if not action:
@@ -798,8 +830,27 @@ ASSISTANT_BOOT_MENU = (
     "2 - BI (dashboards e indicadores)"
 )
 ASSISTANT_SESSION_TIMEOUT_MINUTES = 10
+ASSISTANT_MAX_SESSION_TIMEOUT_MINUTES = 1440
 ASSISTANT_RESET_COMMANDS = {"menu", "inicio", "iniciar", "voltar"}
 ASSISTANT_CANCEL_COMMANDS = {"cancelar", "cancela", "cancel", "sair", "encerrar", "parar"}
+ASSISTANT_RECENT_PRODUCT_REFERENCE_TERMS = {
+    "esse",
+    "esses",
+    "essas",
+    "desses",
+    "dessas",
+    "este",
+    "eles",
+    "elas",
+    "ambos",
+    "ambas",
+    "os dois",
+    "as duas",
+    "estes",
+    "estas",
+    "destes",
+    "destas",
+}
 
 
 def order_assistant_settings(db: Session, company_id: int) -> dict:
@@ -813,12 +864,13 @@ def order_assistant_settings(db: Session, company_id: int) -> dict:
         "enabled": False,
         "provider": "gemini",
         "model": "gemini-2.5-flash",
+        "audio_model": "gemini-2.5-flash-lite",
         "api_key": None,
         "require_confirmation": True,
         "create_as_draft": True,
         "default_payment_days": 30,
         "price_table_id": None,
-        "session_timeout_minutes": ASSISTANT_SESSION_TIMEOUT_MINUTES,
+        "session_timeout_minutes": 30,
     }
     if not item:
         return defaults
@@ -859,19 +911,39 @@ def extract_json_object(value: str) -> dict:
     return json.loads(text_value[start:end + 1])
 
 
-def gemini_extract_order(message: str, customers: list[dict], products: list[dict], settings_value: dict) -> dict:
+def gemini_extract_order(
+    message: str,
+    customers: list[dict],
+    products: list[dict],
+    settings_value: dict,
+    recent_products: list[dict] | None = None,
+) -> dict:
     api_key = settings_value.get("api_key")
     model = settings_value.get("model") or "gemini-2.5-flash"
     if not api_key:
         raise RuntimeError("Chave da IA nao configurada no EasyControl")
     customer_catalog = [{"id": row["id"], "name": row["name"]} for row in customers]
     product_catalog = [{"id": row["id"], "sku": row["sku"], "name": row["name"]} for row in products]
+    recent_product_catalog = [
+        {"id": row["id"], "sku": row["sku"], "name": row["name"]}
+        for row in (recent_products or [])
+    ]
+    recent_instruction = (
+        "Produtos consultados recentemente nesta sessao: "
+        f"{json.dumps(recent_product_catalog, ensure_ascii=False)}. "
+        "Se a mensagem usar referencias como 'esses produtos', 'desses', 'eles', 'ambos' ou '2 de cada', "
+        "interprete como os produtos consultados recentemente e preencha items com o sku ou nome deles. "
+        if recent_product_catalog
+        else ""
+    )
     prompt = (
         "Extraia um pedido comercial da mensagem. Responda somente JSON valido com: "
         '{"customer":"texto ou null","items":[{"product":"texto","quantity":numero}],'
         '"payment_days":numero ou null,"payment_terms":[numero],"delivery_date":"YYYY-MM-DD ou null"}. '
         "Em payment_terms, preserve todos os prazos informados, por exemplo 30/60/90. "
+        "Quando o usuario disser 'de cada', aplique a mesma quantidade a todos os produtos referenciados. "
         "Use payment_days como o maior prazo ou null quando nenhum prazo for informado. "
+        f"{recent_instruction}"
         "Nao invente cliente nem produto. Catalogo de clientes: "
         f"{json.dumps(customer_catalog, ensure_ascii=False)}. Catalogo de produtos: "
         f"{json.dumps(product_catalog, ensure_ascii=False)}. Mensagem: {message}"
@@ -905,7 +977,6 @@ def gemini_extract_order(message: str, customers: list[dict], products: list[dic
 
 def gemini_transcribe_audio(audio_base64: str, mime_type: str | None, settings_value: dict) -> str:
     api_key = settings_value.get("api_key")
-    model = settings_value.get("model") or "gemini-2.5-flash"
     if not api_key:
         raise RuntimeError("Chave da IA nao configurada no EasyControl")
     try:
@@ -922,24 +993,37 @@ def gemini_transcribe_audio(audio_base64: str, mime_type: str | None, settings_v
         }],
         "generationConfig": {"temperature": 0.1, "maxOutputTokens": 1200, "thinkingConfig": {"thinkingBudget": 0}},
     }
-    request_data = UrlRequest(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
-    )
-    try:
-        with urlopen(request_data, timeout=90) as response:
-            body = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        raise RuntimeError(f"IA retornou erro {exc.code} ao transcrever o audio") from exc
-    except URLError as exc:
-        raise RuntimeError("Nao foi possivel transcrever o audio agora") from exc
-    parts = (body.get("candidates") or [{}])[0].get("content", {}).get("parts") or []
-    transcription = "\n".join(part.get("text", "") for part in parts if part.get("text")).strip()
-    if not transcription:
-        raise RuntimeError("Nao consegui entender o audio. Tente novamente ou envie por texto.")
-    return transcription
+    configured_model = settings_value.get("model") or "gemini-2.5-flash"
+    audio_model = settings_value.get("audio_model") or "gemini-2.5-flash-lite"
+    models = list(dict.fromkeys([audio_model, configured_model]))
+    quota_exhausted = False
+
+    for model in models:
+        request_data = UrlRequest(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            method="POST",
+            headers={"Content-Type": "application/json", "x-goog-api-key": api_key},
+        )
+        try:
+            with urlopen(request_data, timeout=90) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            quota_exhausted = quota_exhausted or exc.code == 429
+            continue
+        except URLError:
+            continue
+
+        parts = (body.get("candidates") or [{}])[0].get("content", {}).get("parts") or []
+        transcription = "\n".join(part.get("text", "") for part in parts if part.get("text")).strip()
+        if transcription:
+            return transcription
+
+    if quota_exhausted:
+        raise RuntimeError(
+            "O limite temporario da transcricao foi atingido. Aguarde um minuto e tente novamente ou envie por texto."
+        )
+    raise RuntimeError("Nao consegui entender o audio. Tente novamente ou envie por texto.")
 
 
 def representative_customers_for_assistant(db: Session, representative: SalesRepresentative) -> list[dict]:
@@ -982,16 +1066,188 @@ def assistant_price_table(db: Session, company_id: int, configured_id: int | Non
     return table
 
 
-def build_assistant_draft(db: Session, representative: SalesRepresentative, message: str, settings_value: dict) -> dict:
+def assistant_product_terms(product: dict) -> list[str]:
+    ignored = {"sim", "de", "do", "da", "dos", "das", "para", "com", "sem", "agricola", "semente", "granulada"}
+    source = normalize_search(f"{product.get('sku') or ''} {product.get('name') or ''}")
+    return [term for term in source.split() if len(term) > 3 and term not in ignored]
+
+
+def assistant_product_mentioned(product: dict, normalized_message: str) -> bool:
+    sku = normalize_search(str(product.get("sku") or ""))
+    name = normalize_search(str(product.get("name") or ""))
+    if sku and sku in normalized_message:
+        return True
+    if name and name in normalized_message:
+        return True
+    return any(term in normalized_message for term in assistant_product_terms(product))
+
+
+def assistant_customer_match(message: str, customers: list[dict]) -> tuple[dict | None, float]:
+    customer, score = best_catalog_match(message, customers, ("id", "name"))
+    if customer and score >= 0.72:
+        return customer, score
+    normalized_message = normalize_search(message)
+    scored = []
+    ignored = {"sim", "fazenda", "cliente", "mercado"}
+    for row in customers:
+        terms = [
+            term
+            for term in normalize_search(str(row.get("name") or "")).split()
+            if len(term) > 2 and term not in ignored
+        ]
+        if not terms:
+            continue
+        hits = sum(1 for term in terms if term in normalized_message)
+        if hits:
+            scored.append((hits / len(terms), row))
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if scored and scored[0][0] >= 0.65:
+        return scored[0][1], scored[0][0]
+    return customer, score
+
+
+def assistant_quantity_near_product(product: dict, normalized_message: str) -> Decimal | None:
+    positions = []
+    for term in [normalize_search(str(product.get("sku") or "")), *assistant_product_terms(product)]:
+        if not term:
+            continue
+        index = normalized_message.find(term)
+        if index >= 0:
+            positions.append(index)
+    if not positions:
+        return None
+    index = min(positions)
+    before = normalized_message[max(0, index - 50):index]
+    matches = re.findall(r"\b(\d+(?:[,.]\d+)?)\b(?:\s+unidades?)?(?:\s+de)?\s*$", before)
+    if not matches:
+        matches = re.findall(r"\b(\d+(?:[,.]\d+)?)\b", before)
+    if not matches:
+        return None
+    return Decimal(matches[-1].replace(",", "."))
+
+
+def assistant_shared_quantity(normalized_message: str) -> Decimal | None:
+    patterns = [
+        r"\b(\d+(?:[,.]\d+)?)\s+unidades?\s+cada\b",
+        r"\b(\d+(?:[,.]\d+)?)\s+de\s+cada\b",
+        r"\b(\d+(?:[,.]\d+)?)\s+cada\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized_message)
+        if match:
+            return Decimal(match.group(1).replace(",", "."))
+    return None
+
+
+def deterministic_assistant_extraction(
+    message: str,
+    customers: list[dict],
+    products: list[dict],
+    recent_products: list[dict],
+    settings_value: dict,
+) -> dict:
+    normalized = normalize_search(message)
+    customer, customer_score = assistant_customer_match(message, customers)
+    if not customer or customer_score < 0.72:
+        raise HTTPException(status_code=400, detail="Nao identifiquei com seguranca o cliente da sua carteira. Informe o nome do cliente.")
+
+    shared_quantity = assistant_shared_quantity(normalized)
+    items = []
+    references_recent_products = any(term in normalized for term in ASSISTANT_RECENT_PRODUCT_REFERENCE_TERMS)
+    if references_recent_products and shared_quantity and recent_products:
+        for product in recent_products:
+            items.append({"product": product.get("sku") or product.get("name"), "quantity": str(shared_quantity)})
+
+    recent_ids = {int(product.get("id")) for product in recent_products if product.get("id") is not None}
+    for product in products:
+        if int(product["id"]) in recent_ids and references_recent_products:
+            continue
+        if not assistant_product_mentioned(product, normalized):
+            continue
+        quantity = assistant_quantity_near_product(product, normalized)
+        if quantity and quantity > 0:
+            items.append({"product": product["sku"], "quantity": str(quantity)})
+
+    payment_terms = assistant_extract_payment_terms(normalized)
+    return {
+        "customer": customer["name"],
+        "items": items,
+        "payment_days": max(payment_terms) if payment_terms else None,
+        "payment_terms": payment_terms,
+        "delivery_date": None,
+    }
+
+
+def build_assistant_draft(
+    db: Session,
+    representative: SalesRepresentative,
+    message: str,
+    settings_value: dict,
+    memory: dict | None = None,
+) -> dict:
     customers = representative_customers_for_assistant(db, representative)
     table = assistant_price_table(db, representative.company_id, settings_value.get("price_table_id"))
     products = assistant_products(db, representative.company_id, table.id)
-    extracted = gemini_extract_order(message, customers, products, settings_value)
-    customer, customer_score = best_catalog_match(str(extracted.get("customer") or ""), customers, ("id", "name"))
+    recent_products = (memory or {}).get("recent_products") or []
+    normalized_message = normalize_search(message)
+    references_recent_products = any(term in normalized_message for term in ASSISTANT_RECENT_PRODUCT_REFERENCE_TERMS)
+    if recent_products and references_recent_products:
+        extracted = deterministic_assistant_extraction(message, customers, products, recent_products, settings_value)
+    else:
+        try:
+            extracted = gemini_extract_order(message, customers, products, settings_value, recent_products=recent_products)
+        except RuntimeError as exc:
+            if "429" not in str(exc) and "rate" not in str(exc).lower():
+                raise
+            extracted = deterministic_assistant_extraction(message, customers, products, recent_products, settings_value)
+    customer, customer_score = assistant_customer_match(str(extracted.get("customer") or ""), customers)
     if not customer or customer_score < 0.72:
         raise HTTPException(status_code=400, detail="Nao identifiquei com seguranca o cliente da sua carteira. Informe o nome do cliente.")
     resolved_items = []
-    for raw_item in extracted.get("items") or []:
+    raw_items = extracted.get("items") or []
+    references_recent_products = any(term in normalized_message for term in ASSISTANT_RECENT_PRODUCT_REFERENCE_TERMS)
+    if references_recent_products and recent_products:
+        parsed_quantities = [
+            Decimal(str(raw_item.get("quantity") or 0))
+            for raw_item in raw_items
+            if raw_item.get("quantity") is not None
+        ]
+        shared_quantity = next((quantity for quantity in parsed_quantities if quantity > 0), Decimal("0"))
+        vague_products = not raw_items or any(
+            any(term in normalize_search(str(raw_item.get("product") or "")) for term in ASSISTANT_RECENT_PRODUCT_REFERENCE_TERMS)
+            for raw_item in raw_items
+        )
+        if shared_quantity > 0:
+            recent_raw_items = [
+                {"product": product.get("sku") or product.get("name"), "quantity": str(shared_quantity)}
+                for product in recent_products
+            ]
+            if vague_products:
+                raw_items = recent_raw_items + [
+                    raw_item
+                    for raw_item in raw_items
+                    if not any(term in normalize_search(str(raw_item.get("product") or "")) for term in ASSISTANT_RECENT_PRODUCT_REFERENCE_TERMS)
+                ]
+            else:
+                existing_products = normalize_search(" ".join(str(raw_item.get("product") or "") for raw_item in raw_items))
+                def recent_product_already_present(raw_item: dict) -> bool:
+                    product_text = normalize_search(str(raw_item.get("product") or ""))
+                    if product_text and product_text in existing_products:
+                        return True
+                    terms = [
+                        term
+                        for term in product_text.split()
+                        if len(term) > 3
+                    ]
+                    return bool(terms and any(term in existing_products for term in terms))
+
+                missing_recent_items = [
+                    raw_item
+                    for raw_item in recent_raw_items
+                    if not recent_product_already_present(raw_item)
+                ]
+                raw_items = missing_recent_items + raw_items
+    for raw_item in raw_items:
         quantity = Decimal(str(raw_item.get("quantity") or 0))
         product, score = best_catalog_match(str(raw_item.get("product") or ""), products, ("sku", "name"))
         if not product or score < 0.70 or quantity <= 0:
@@ -1053,6 +1309,105 @@ def assistant_summary(draft: dict) -> str:
     return "\n".join(lines)
 
 
+def assistant_confirmation_requested(normalized_message: str) -> bool:
+    return any(
+        term in normalized_message
+        for term in {"sim", "confirmar", "confirmo", "pode confirmar", "pode criar", "cria o pedido", "fechar pedido"}
+    )
+
+
+def assistant_extract_payment_terms(normalized_message: str) -> list[int]:
+    terms = []
+    spaced_terms = re.search(r"\b(?:para|pra|em|pagamento)\s+(\d{1,3})\s+(\d{1,3})\s+(\d{1,3})(?:\s|$)", normalized_message)
+    if spaced_terms:
+        terms.extend(int(value) for value in spaced_terms.groups())
+    for match in re.findall(r"\b\d{1,3}(?:\s*/\s*\d{1,3})+\b", normalized_message):
+        terms.extend(int(value) for value in re.findall(r"\d{1,3}", match))
+    if not terms and any(term in normalized_message for term in ["prazo", "pagamento", "condicao", "condicoes", "boleto", "faz em", "fazer em"]):
+        terms.extend(int(value) for value in re.findall(r"\b\d{1,3}\b", normalized_message))
+    if not terms and assistant_confirmation_requested(normalized_message):
+        numbers = [int(value) for value in re.findall(r"\b\d{1,3}\b", normalized_message)]
+        if len(numbers) > 1:
+            terms.extend(numbers)
+    return sorted({max(value, 0) for value in terms})
+
+
+def recalculate_assistant_draft_totals(db: Session, draft: dict, payment_terms: list[int] | None = None) -> dict:
+    table = get_price_table_or_404(db, int(draft["price_table_id"]))
+    if payment_terms:
+        draft["payment_terms"] = payment_terms
+        draft["payment_days"] = max(payment_terms)
+    payment_days = int(draft.get("payment_days") or 0)
+    payment_due_date = date.today() + timedelta(days=max(payment_days, 0))
+    draft["payment_due_date"] = payment_due_date.isoformat()
+    total = Decimal("0")
+    for item in draft.get("items") or []:
+        price_item = db.scalar(select(PriceTableItem).where(
+            PriceTableItem.price_table_id == table.id,
+            PriceTableItem.product_id == int(item["product_id"]),
+            PriceTableItem.active == True,
+        ))
+        if not price_item:
+            raise HTTPException(status_code=400, detail=f"Produto {item.get('sku') or item.get('name')} sem preco na tabela {table.name}.")
+        quantity = Decimal(str(item["quantity"]))
+        unit_price = apply_progressive_discount(
+            corrected_price(table, price_item.base_price, payment_due_date),
+            applicable_progressive_tier(db, price_item, quantity),
+        )
+        item["unit_price"] = str(money_round(unit_price))
+        item["total"] = str(money_round(unit_price * quantity))
+        total += Decimal(item["total"])
+    draft["total"] = str(money_round(total))
+    return draft
+
+
+def assistant_item_matches_terms(item: dict, terms: list[str]) -> bool:
+    haystack = normalize_search(f"{item.get('sku') or ''} {item.get('name') or ''}")
+    return any(term and (term in haystack or haystack in term) for term in terms)
+
+
+def remove_assistant_draft_items(draft: dict, message_text: str) -> tuple[dict, bool]:
+    normalized = normalize_search(message_text)
+    remove_terms = ["tirar", "tira", "remove", "remover", "excluir", "exclui", "sem", "nao pedi", "nao incluir"]
+    if not any(term in normalized for term in remove_terms):
+        return draft, False
+    ignored = {
+        "a", "as", "de", "do", "dos", "da", "das", "e", "o", "os", "um", "uma",
+        "pedi", "pedido", "produto", "produtos", "item", "itens", "pode", "por",
+        "favor", "pagamento", "prazo", "condicao", "condicoes", "tirar", "tira",
+        "remove", "remover", "excluir", "exclui", "sem", "nao", "incluir",
+    }
+    terms = [term for term in normalized.split() if len(term) > 2 and term not in ignored and not term.isdigit()]
+    if not terms:
+        return draft, False
+    kept_items = [
+        item
+        for item in draft.get("items") or []
+        if not assistant_item_matches_terms(item, terms)
+    ]
+    if len(kept_items) == len(draft.get("items") or []):
+        return draft, False
+    if not kept_items:
+        raise HTTPException(status_code=400, detail="A alteracao removeria todos os itens do pedido.")
+    draft["items"] = kept_items
+    return draft, True
+
+
+def apply_assistant_draft_update(db: Session, draft: dict, message_text: str) -> tuple[dict, bool]:
+    normalized = normalize_search(message_text)
+    changed = False
+    draft, removed_items = remove_assistant_draft_items(draft, message_text)
+    if removed_items:
+        changed = True
+    payment_terms = assistant_extract_payment_terms(normalized)
+    if payment_terms:
+        draft = recalculate_assistant_draft_totals(db, draft, payment_terms)
+        changed = True
+    elif changed:
+        draft = recalculate_assistant_draft_totals(db, draft)
+    return draft, changed
+
+
 def is_assistant_catalog_request(normalized_message: str) -> bool:
     catalog_commands = (
         "catalogo",
@@ -1088,11 +1443,63 @@ def assistant_session_module(session: WhatsappOrderSession | None) -> str | None
     return (session.draft or {}).get("selected_module") if session else None
 
 
-def save_assistant_module_session(
+def assistant_session_timeout_minutes(settings_value: dict) -> int:
+    return min(
+        max(int(settings_value.get("session_timeout_minutes") or ASSISTANT_SESSION_TIMEOUT_MINUTES), 1),
+        ASSISTANT_MAX_SESSION_TIMEOUT_MINUTES,
+    )
+
+
+def assistant_session_notice(minutes: int) -> str:
+    return f"\n\nVou manter esta conversa aberta por {minutes} min sem atividade. Se quiser encerrar antes, envie CANCELAR."
+
+
+def assistant_session_memory(session: WhatsappOrderSession | None) -> dict:
+    return dict(session.draft or {}) if session and isinstance(session.draft, dict) else {}
+
+
+def assistant_recent_products(memory: dict) -> list[dict]:
+    products = memory.get("recent_products") or []
+    if not isinstance(products, list):
+        return []
+    cleaned = []
+    for product in products[:10]:
+        if not isinstance(product, dict):
+            continue
+        try:
+            product_id = int(product.get("id") or product.get("product_id"))
+        except (TypeError, ValueError):
+            continue
+        cleaned.append(
+            {
+                "id": product_id,
+                "sku": str(product.get("sku") or ""),
+                "name": str(product.get("name") or ""),
+            }
+        )
+    return cleaned
+
+
+def assistant_pending_order_message(memory: dict) -> str | None:
+    value = memory.get("pending_order_message")
+    return str(value).strip() if value else None
+
+
+def assistant_order_followup_message(memory: dict, message_text: str) -> str:
+    pending = assistant_pending_order_message(memory)
+    if not pending:
+        return message_text
+    normalized = normalize_search(message_text)
+    if normalized in ASSISTANT_RESET_COMMANDS or normalized in ASSISTANT_CANCEL_COMMANDS:
+        return message_text
+    return f"{pending}\nComplemento do usuario: {message_text}"
+
+
+def save_assistant_session_memory(
     db: Session,
     representative: SalesRepresentative,
     phone: str,
-    selected_module: str | None,
+    memory: dict,
     message_text: str,
     expires_at: datetime,
     session: WhatsappOrderSession | None = None,
@@ -1108,14 +1515,50 @@ def save_assistant_module_session(
         )
         db.add(session)
     session.state = "collecting"
-    session.draft = {"selected_module": selected_module} if selected_module else {}
+    session.draft = memory
     session.last_message = message_text
     session.expires_at = expires_at
+    close_other_assistant_sessions(db, representative, phone, session)
     db.commit()
     return session
 
 
-def assistant_catalog(db: Session, representative: SalesRepresentative, settings_value: dict, message: str) -> str:
+def close_other_assistant_sessions(
+    db: Session,
+    representative: SalesRepresentative,
+    phone: str,
+    keep_session: WhatsappOrderSession | None = None,
+) -> None:
+    query = select(WhatsappOrderSession).where(
+        WhatsappOrderSession.sales_representative_id == representative.id,
+        WhatsappOrderSession.whatsapp_number == phone,
+        WhatsappOrderSession.state.in_(["collecting", "awaiting_confirmation"]),
+    )
+    if keep_session and keep_session.id:
+        query = query.where(WhatsappOrderSession.id != keep_session.id)
+    for old_session in db.scalars(query).all():
+        old_session.state = "expired"
+        old_session.draft = {}
+
+
+def save_assistant_module_session(
+    db: Session,
+    representative: SalesRepresentative,
+    phone: str,
+    selected_module: str | None,
+    message_text: str,
+    expires_at: datetime,
+    session: WhatsappOrderSession | None = None,
+) -> WhatsappOrderSession:
+    memory = assistant_session_memory(session)
+    if selected_module:
+        memory["selected_module"] = selected_module
+    else:
+        memory = {}
+    return save_assistant_session_memory(db, representative, phone, memory, message_text, expires_at, session)
+
+
+def assistant_catalog(db: Session, representative: SalesRepresentative, settings_value: dict, message: str) -> tuple[str, list[dict]]:
     table = assistant_price_table(db, representative.company_id, settings_value.get("price_table_id"))
     products = assistant_products(db, representative.company_id, table.id)
     normalized = normalize_search(message)
@@ -1142,7 +1585,7 @@ def assistant_catalog(db: Session, representative: SalesRepresentative, settings
             if matches_query(product)
         ]
     if not products:
-        return f"Nao encontrei produtos para essa busca na tabela {table.name}."
+        return f"Nao encontrei produtos para essa busca na tabela {table.name}.", []
     default_payment_days = int(settings_value.get("default_payment_days") or 30)
     due_date = date.today() + timedelta(days=default_payment_days)
     lines = [
@@ -1162,7 +1605,7 @@ def assistant_catalog(db: Session, representative: SalesRepresentative, settings
         lines.append(f"- {product['sku']} | {product['name']} | R$ {corrected:.2f} (a vista/base: R$ {base_price:.2f})")
     if len(products) > 30:
         lines.append(f"Mostrando 30 de {len(products)} produtos. Envie 'catalogo' com o nome para filtrar.")
-    return "\n".join(lines)
+    return "\n".join(lines), products[:10]
 
 
 def create_order_from_assistant(db: Session, representative: SalesRepresentative, draft: dict) -> SalesOrder:
@@ -2411,6 +2854,38 @@ def me(request: Request, db: Session = Depends(get_db)):
     )
 
 
+@app.get("/home/preferences", response_model=HomePreferencesRead, tags=["Sistema"])
+def get_home_preferences(request: Request, db: Session = Depends(get_db)):
+    user = user_from_authorization(db, request.headers.get("Authorization"))
+    if not user:
+        raise HTTPException(status_code=401, detail="Login obrigatorio")
+    available = available_home_widgets(db, user)
+    preference = db.scalar(select(UserHomePreference).where(UserHomePreference.user_id == user.id))
+    saved_widgets = (preference.settings or {}).get("widgets") if preference else None
+    widgets = DEFAULT_HOME_WIDGETS if saved_widgets is None else saved_widgets
+    return HomePreferencesRead(
+        widgets=sanitize_home_widgets(widgets, available),
+        available_widgets=available,
+    )
+
+
+@app.put("/home/preferences", response_model=HomePreferencesRead, tags=["Sistema"])
+def save_home_preferences(payload: HomePreferencesUpdate, request: Request, db: Session = Depends(get_db)):
+    user = user_from_authorization(db, request.headers.get("Authorization"))
+    if not user:
+        raise HTTPException(status_code=401, detail="Login obrigatorio")
+    available = available_home_widgets(db, user)
+    widgets = sanitize_home_widgets(payload.widgets, available)
+    preference = db.scalar(select(UserHomePreference).where(UserHomePreference.user_id == user.id))
+    if not preference:
+        preference = UserHomePreference(user_id=user.id, settings={})
+        db.add(preference)
+    preference.settings = {**(preference.settings or {}), "widgets": widgets}
+    preference.updated_at = datetime.utcnow()
+    db.commit()
+    return HomePreferencesRead(widgets=widgets, available_widgets=available)
+
+
 @app.get("/health", tags=["Sistema"])
 def health():
     return {"ok": True, "service": "easysales", "customer_provider": settings.customer_provider}
@@ -3091,25 +3566,26 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
             "sales_representative_id": representative.id,
         }
     now = datetime.utcnow()
-    session = db.scalar(
+    latest_session = db.scalar(
         select(WhatsappOrderSession)
         .where(
             WhatsappOrderSession.sales_representative_id == representative.id,
             WhatsappOrderSession.whatsapp_number == phone,
-            WhatsappOrderSession.state.in_(["collecting", "awaiting_confirmation"]),
         )
         .order_by(WhatsappOrderSession.id.desc())
     )
+    session = latest_session if latest_session and latest_session.state in {"collecting", "awaiting_confirmation"} else None
     if session and session.expires_at < now:
         session.state = "expired"
         db.commit()
         session = None
+        expired_session = True
+    else:
+        expired_session = False
     normalized_message = normalize_search(message_text)
-    session_timeout_minutes = min(
-        max(int(settings_value.get("session_timeout_minutes") or ASSISTANT_SESSION_TIMEOUT_MINUTES), 1),
-        ASSISTANT_SESSION_TIMEOUT_MINUTES,
-    )
+    session_timeout_minutes = assistant_session_timeout_minutes(settings_value)
     expires_at = now + timedelta(minutes=session_timeout_minutes)
+    session_notice = assistant_session_notice(session_timeout_minutes)
     if normalized_message in ASSISTANT_CANCEL_COMMANDS:
         if session:
             session.state = "cancelled"
@@ -3135,12 +3611,12 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
         save_assistant_module_session(db, representative, phone, selected_module, message_text, expires_at, session)
         if selected_module == "bi":
             return {
-                "reply": "BI selecionado. Envie sua pergunta sobre dashboards ou indicadores.",
+                "reply": "BI selecionado. Envie sua pergunta sobre dashboards ou indicadores." + session_notice,
                 "state": "bi_selected",
                 "sales_representative_id": representative.id,
             }
         return {
-            "reply": "EasySales selecionado. Pode pedir precos, catalogo ou enviar um pedido.",
+            "reply": "EasySales selecionado. Pode pedir precos, catalogo ou enviar um pedido." + session_notice,
             "state": "sales_selected",
             "sales_representative_id": representative.id,
         }
@@ -3152,18 +3628,64 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
         }
     if current_module != "sales":
         save_assistant_module_session(db, representative, phone, None, message_text, expires_at, session)
+        reply = ASSISTANT_BOOT_MENU
+        if expired_session:
+            reply = "A sessao anterior foi encerrada por inatividade.\n\n" + reply
         return {
-            "reply": ASSISTANT_BOOT_MENU,
+            "reply": reply,
             "state": "routing",
             "sales_representative_id": representative.id,
         }
     if is_assistant_catalog_request(normalized_message):
+        reply, recent_products = assistant_catalog(db, representative, settings_value, message_text)
+        memory = assistant_session_memory(session)
+        memory["selected_module"] = "sales"
+        if recent_products:
+            memory["recent_products"] = recent_products
+            memory["last_intent"] = "catalog"
+        save_assistant_session_memory(db, representative, phone, memory, message_text, expires_at, session)
         return {
-            "reply": assistant_catalog(db, representative, settings_value, message_text),
+            "reply": reply + session_notice,
             "state": "catalog",
             "sales_representative_id": representative.id,
         }
     if session and session.state == "awaiting_confirmation":
+        draft_update_error = None
+        try:
+            updated_draft, draft_changed = apply_assistant_draft_update(db, dict(session.draft or {}), message_text)
+        except (HTTPException, ValueError, KeyError) as exc:
+            updated_draft = session.draft
+            draft_changed = False
+            draft_update_error = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        if draft_changed:
+            session.draft = updated_draft
+            session.last_message = message_text
+            session.expires_at = expires_at
+            if assistant_confirmation_requested(normalized_message):
+                order = create_order_from_assistant(db, representative, session.draft)
+                session.order_id = order.id
+                session.state = "completed"
+                db.commit()
+                db.refresh(order)
+                return {
+                    "reply": f"Atualizei as condicoes e criei o pedido {order.order_number} como rascunho no EasySales. Total R$ {Decimal(order.total_amount):.2f}.",
+                    "state": "completed",
+                    "sales_representative_id": representative.id,
+                    "order_id": order.id,
+                    "order_number": order.order_number,
+                }
+            db.commit()
+            return {
+                "reply": assistant_summary(session.draft) + session_notice,
+                "state": "awaiting_confirmation",
+                "sales_representative_id": representative.id,
+            }
+        if draft_update_error:
+            return {
+                "reply": f"Nao consegui aplicar a alteracao: {draft_update_error}. Responda SIM para criar, CANCELAR para cancelar ou envie a alteracao novamente.",
+                "state": "awaiting_confirmation",
+                "sales_representative_id": representative.id,
+            }
         if normalized_message in {"sim", "s", "confirmar", "confirmo", "pode criar", "ok"}:
             order = create_order_from_assistant(db, representative, session.draft)
             session.order_id = order.id
@@ -3183,14 +3705,36 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
             "sales_representative_id": representative.id,
         }
     try:
-        draft = build_assistant_draft(db, representative, message_text, settings_value)
+        memory = assistant_session_memory(session)
+        memory["recent_products"] = assistant_recent_products(memory)
+        order_message = assistant_order_followup_message(memory, message_text)
+        draft = build_assistant_draft(db, representative, order_message, settings_value, memory=memory)
     except (HTTPException, RuntimeError, ValueError) as exc:
         detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+        if detail in {
+            "Nao identifiquei com seguranca o cliente da sua carteira. Informe o nome do cliente.",
+            "Nao encontrei produtos e quantidades na mensagem.",
+        }:
+            memory = assistant_session_memory(session)
+            memory["selected_module"] = "sales"
+            memory["recent_products"] = assistant_recent_products(memory)
+            memory["pending_order_message"] = assistant_order_followup_message(memory, message_text)
+            memory["last_intent"] = "pending_order"
+            save_assistant_session_memory(db, representative, phone, memory, message_text, expires_at, session)
         return {
             "reply": detail,
             "state": "collecting",
             "sales_representative_id": representative.id,
         }
+    draft_memory = assistant_session_memory(session)
+    draft_memory.pop("pending_order_message", None)
+    draft_memory["selected_module"] = "sales"
+    draft_memory["last_intent"] = "order_draft"
+    draft_memory["recent_products"] = [
+        {"id": item["product_id"], "sku": item["sku"], "name": item["name"]}
+        for item in draft["items"]
+    ]
+    draft.update(draft_memory)
     session = WhatsappOrderSession(
         company_id=representative.company_id,
         sales_representative_id=representative.id,
@@ -3201,6 +3745,8 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
         expires_at=expires_at,
     )
     db.add(session)
+    db.flush()
+    close_other_assistant_sessions(db, representative, phone, session)
     if not settings_value.get("require_confirmation", True):
         order = create_order_from_assistant(db, representative, draft)
         session.order_id = order.id
@@ -3215,7 +3761,7 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
         }
     db.commit()
     return {
-        "reply": assistant_summary(draft),
+        "reply": assistant_summary(draft) + session_notice,
         "state": "awaiting_confirmation",
         "sales_representative_id": representative.id,
     }
