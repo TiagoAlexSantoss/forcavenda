@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     jsreport_url: str = Field("http://localhost:5488", alias="JSREPORT_URL")
     jsreport_username: str | None = Field(None, alias="JSREPORT_USERNAME")
     jsreport_password: str | None = Field(None, alias="JSREPORT_PASSWORD")
+    evolution_base_url: str = Field("http://localhost:8081", alias="EVOLUTION_BASE_URL")
+    evolution_api_key: str = Field("change-me-evolution-local", alias="EVOLUTION_API_KEY")
 
     class Config:
         env_file = str(BACKEND_DIR / ".env")

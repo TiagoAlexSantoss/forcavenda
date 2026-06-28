@@ -1,5 +1,6 @@
 import React, { useContext, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
+import { createPortal } from "react-dom";
 import { Bot, Box, CheckCircle2, ChevronDown, ChevronRight, ClipboardList, CreditCard, Edit3, FileText, Filter, HelpCircle, Home, Layers3, LayoutDashboard, LockKeyhole, LogOut, Mail, Menu, Moon, Package, Plus, Printer, RefreshCcw, Search, Send, Settings2, Sun, Tags, Trash2, Users, X, XCircle } from "lucide-react";
 import api from "./services/api";
 import "./styles.css";
@@ -71,9 +72,21 @@ function errorMessage(error, fallback = MESSAGES.operationFailed) {
   return createMessage(MESSAGE_TYPES.error, error?.response?.data?.detail || error?.message || fallback);
 }
 
-async function openOrderPrint(orderId) {
+async function openOrderPrint(orderId, reportId = null) {
   if (!orderId) return;
-  const response = await api.get(`/orders/${orderId}/print`, { responseType: "blob" });
+  const path = reportId ? `/orders/${orderId}/reports/${reportId}/print` : `/orders/${orderId}/print`;
+  const response = await api.get(path, { responseType: "blob" });
+  const file = new Blob([response.data], { type: response.headers["content-type"] || "application/pdf" });
+  const url = URL.createObjectURL(file);
+  window.open(url, "_blank", "noopener,noreferrer");
+  window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+async function openListReportPrint(report) {
+  const response = await api.get(`/reports/${report.id}/print`, {
+    params: { target_screen: report.target_screen },
+    responseType: "blob",
+  });
   const file = new Blob([response.data], { type: response.headers["content-type"] || "application/pdf" });
   const url = URL.createObjectURL(file);
   window.open(url, "_blank", "noopener,noreferrer");
@@ -184,7 +197,7 @@ function App() {
         fetchIf(can("sales_products"), "/stock-movements"),
         fetchIf(can("sales_order_assistant"), "/assistant/status"),
         fetchIf(can("sales_browser_definitions"), "/control/browser-definitions"),
-        fetchIf(can("sales_reports"), "/reports/menu"),
+        api.get("/reports/available"),
       ]);
       setHealth(healthRes.data);
       setCompanies(companiesRes.data);
@@ -390,14 +403,14 @@ function App() {
         <GlobalSearchContext.Provider value={activeTab === "home" ? "" : searchTerm}>
         <BrowserDefinitionsContext.Provider value={controlBrowsers}>
           {activeTab === "home" && <HomePage orders={orders} customers={customers} products={products} priceTables={priceTables} customerMonitoring={customerMonitoring} openTab={openTab} can={can} preferences={homePreferences} onSaveWidgets={saveHomeWidgets} />}
-          {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} companies={companies} run={run} />}
+          {activeTab === "products" && <ProductsBrowser products={products} groups={groups} classes={classes} warehouses={warehouses} balances={balances} movements={movements} companies={companies} reports={salesReports} run={run} />}
           {activeTab === "priceTables" && <PriceTablesBrowser priceTables={priceTables} products={products} companies={companies} run={run} />}
           {activeTab === "groups" && <SimpleCatalogBrowser title="Grupos de produtos" eyebrow="Cadastros" endpoint="/product-groups" entityCode="product_groups" items={groups} template={emptyGroup} companies={companies} companyEndpoint="/product-groups" run={run} />}
           {activeTab === "classes" && <ClassesBrowser classes={classes} groups={groups} companies={companies} run={run} />}
           {activeTab === "customers" && <CustomersBrowser customers={customers} customerProfiles={customerProfiles} salesRepresentatives={salesRepresentatives} companies={companies} run={run} />}
           {activeTab === "customerProfiles" && <CustomerProfilesBrowser profiles={customerProfiles} run={run} />}
           {activeTab === "salesRepresentatives" && <SalesRepresentativesBrowser representatives={salesRepresentatives} users={userOptions} run={run} />}
-          {activeTab === "orders" && <OrdersBrowser orders={orders} customers={customers} salesRepresentatives={salesRepresentatives} products={products} priceTables={priceTables} warehouses={warehouses} run={run} />}
+          {activeTab === "orders" && <OrdersBrowser orders={orders} customers={customers} salesRepresentatives={salesRepresentatives} products={products} priceTables={priceTables} warehouses={warehouses} reports={salesReports} run={run} />}
           {activeTab === "customerManagement" && <CustomerManagementPage rows={customerMonitoring} run={run} />}
           {activeTab === "approvals" && <OrderApprovalsPage orders={orders} run={run} />}
           {activeTab === "orderAssistant" && <OrderAssistantStatusPage status={assistantStatus} />}
@@ -494,10 +507,10 @@ function HomePage({ orders, customers, products, priceTables, customerMonitoring
           <HomeWidgetHeader eyebrow="Navegacao" title="Atalhos" />
           <div className="home-shortcuts">
             {shortcuts.map(({ tab, label, detail, icon: Icon }) => (
-              <button key={tab} type="button" onClick={() => openTab(tab)}>
-                <Icon size={19} />
-                <span><strong>{label}</strong><small>{detail}</small></span>
-                <ChevronRight size={17} />
+              <button className={`home-shortcut shortcut-${tab}`} key={tab} type="button" onClick={() => openTab(tab)}>
+                <span className="home-shortcut-icon"><Icon size={19} /></span>
+                <span className="home-shortcut-copy"><strong>{label}</strong><small>{detail}</small></span>
+                <ChevronRight className="home-shortcut-arrow" size={17} />
               </button>
             ))}
           </div>
@@ -633,7 +646,7 @@ function lotTypeLabel(value) {
   return ({ seeds: "Sementes", general: "Geral", none: "Nao controla" }[value] || value || "Nao controla");
 }
 
-function ProductsBrowser({ products, groups, classes, warehouses, balances, movements, companies, run }) {
+function ProductsBrowser({ products, groups, classes, warehouses, balances, movements, companies, reports, run }) {
   const [modal, setModal] = useState(null);
   const browser = useBrowserFilters(products, ["sku", "name", "product_group_name", "product_class_name"], "products");
   const rows = browser.rows;
@@ -662,7 +675,7 @@ function ProductsBrowser({ products, groups, classes, warehouses, balances, move
   }
 
   return (
-    <Browser title="Produtos" eyebrow="Cadastros" {...browser} onNew={() => setModal({ item: null, form: toForm(null) })}>
+    <Browser title="Produtos" eyebrow="Cadastros" {...browser} headerActions={<ReportPrintButton reports={reports} targetScreen="products" printScope="list" className="icon-button" iconSize={17} />} onNew={() => setModal({ item: null, form: toForm(null) })}>
       <BrowserDataTable browser={browser} items={rows} fallbackColumns={["SKU", "Produto", "Grupo", "Local padrao", "Lote", "Ult. compra", "Custo", "Margem", "Preco sugerido", "Status", "Acoes"]} fallbackRows={rows.map((item) => [
         item.sku,
         item.name,
@@ -1642,6 +1655,7 @@ function OrderAssistantStatusPage({ status }) {
         <span><strong>{status.model}</strong> modelo</span>
         <span><strong>{status.api_configured ? "Configurada" : "Pendente"}</strong> chave IA</span>
         <span><strong>{status.require_confirmation ? "Obrigatoria" : "Automatica"}</strong> confirmacao</span>
+        <span><strong>{status.send_order_pdf ? "Ativo" : "Inativo"}</strong> PDF no WhatsApp</span>
       </div>
       <div className="order-context">
         <span>Entrada Sales <strong>{status.sales_endpoint}</strong></span>
@@ -1730,8 +1744,79 @@ function CustomerModal({ state, setState, customerProfiles, salesRepresentatives
   );
 }
 
+function ReportPrintButton({ reports = [], targetScreen, printScope, recordId = null, className = "", iconSize = 15, showLabel = false }) {
+  const [chooserOpen, setChooserOpen] = useState(false);
+  const [loadingId, setLoadingId] = useState(null);
+  const availableReports = useMemo(
+    () => reports
+      .filter((report) => report.target_screen === targetScreen && (report.print_scope || "list") === printScope)
+      .sort((left, right) => Number(left.ordinal || 0) - Number(right.ordinal || 0)),
+    [reports, targetScreen, printScope],
+  );
+
+  if (!availableReports.length) return null;
+
+  async function printReport(report) {
+    setLoadingId(report.id);
+    try {
+      if (recordId) await openOrderPrint(recordId, report.id);
+      else await openListReportPrint(report);
+      setChooserOpen(false);
+    } catch (error) {
+      window.alert(error?.response?.data?.detail || "Nao foi possivel gerar o relatorio.");
+    } finally {
+      setLoadingId(null);
+    }
+  }
+
+  const onlyReport = availableReports.length === 1 ? availableReports[0] : null;
+  const dialogId = `report-choice-${targetScreen}-${recordId || "list"}`;
+  const chooser = chooserOpen && createPortal(
+    <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setChooserOpen(false)}>
+      <section className="modal report-choice-modal" role="dialog" aria-modal="true" aria-labelledby={dialogId}>
+        <header>
+          <div>
+            <p className="eyebrow compact">Impressao</p>
+            <h2 id={dialogId}>Escolha o relatorio</h2>
+          </div>
+          <button type="button" className="icon-button" onClick={() => setChooserOpen(false)} title="Fechar"><X size={18} /></button>
+        </header>
+        <div className="report-choice-list">
+          {availableReports.map((report) => (
+            <button type="button" key={report.id} disabled={loadingId !== null} onClick={() => printReport(report)}>
+              <FileText size={18} />
+              <span>
+                <strong>{report.menu_label || report.name}</strong>
+                <small>{report.description || `${String(report.output_format || "pdf").toUpperCase()} - ${report.code}`}</small>
+              </span>
+              <small>{loadingId === report.id ? "Gerando..." : String(report.output_format || "pdf").toUpperCase()}</small>
+            </button>
+          ))}
+        </div>
+      </section>
+    </div>,
+    document.body,
+  );
+
+  return (
+    <>
+      <button
+        type="button"
+        className={className}
+        disabled={loadingId !== null}
+        onClick={() => onlyReport ? printReport(onlyReport) : setChooserOpen(true)}
+        title={onlyReport ? `Imprimir ${onlyReport.menu_label || onlyReport.name}` : "Escolher relatorio para imprimir"}
+      >
+        <Printer size={iconSize} />
+        {showLabel && <span>Imprimir</span>}
+      </button>
+      {chooser}
+    </>
+  );
+}
+
 function SalesReportsPage({ reports, openTab }) {
-  const browser = useBrowserFilters(reports, ["menu_label", "name", "entity_name", "browser_name", "target_screen", "source_mode"]);
+  const browser = useBrowserFilters(reports.filter((report) => report.show_in_menu), ["menu_label", "name", "entity_name", "browser_name", "target_screen", "source_mode"]);
   return (
     <Browser title="Relatorios" eyebrow="Publicados pelo EasyControl" {...browser}>
       <DataTable columns={["Relatorio", "Origem", "Tela", "Formato", "Acoes"]} rows={browser.rows.map((item) => [
@@ -1740,9 +1825,11 @@ function SalesReportsPage({ reports, openTab }) {
         salesReportScreenLabel(item.target_screen),
         String(item.output_format || "pdf").toUpperCase(),
         <div className="row-actions">
-          {item.target_screen === "orders"
-            ? <button type="button" onClick={() => openTab("orders")} title="Abrir tela de pedidos"><ClipboardList size={15} /> Pedidos</button>
-            : <button type="button" disabled title="Este relatorio ainda precisa de parametros">Parametros</button>}
+          {(item.print_scope || "list") === "record"
+            ? <button type="button" onClick={() => openTab(item.target_screen)} title={`Abrir tela de ${salesReportScreenLabel(item.target_screen)}`}><ClipboardList size={15} /> {salesReportScreenLabel(item.target_screen)}</button>
+            : item.data_sql || ["browser", "entity"].includes(item.source_mode)
+              ? <ReportPrintButton reports={[item]} targetScreen={item.target_screen} printScope="list" showLabel />
+              : <button type="button" disabled title="Este relatorio ainda precisa de parametros">Parametros</button>}
         </div>,
       ])} />
     </Browser>
@@ -1752,11 +1839,12 @@ function SalesReportsPage({ reports, openTab }) {
 function salesReportScreenLabel(screen) {
   return {
     orders: "Pedidos",
+    products: "Produtos",
     reports: "Menu de relatorios",
   }[screen] || screen || "-";
 }
 
-function OrdersBrowser({ orders, customers, salesRepresentatives, products, priceTables, warehouses, run }) {
+function OrdersBrowser({ orders, customers, salesRepresentatives, products, priceTables, warehouses, reports, run }) {
   const [modal, setModal] = useState(null);
   const browser = useBrowserFilters(orders, ["order_number", "order_type", "customer_name", "price_table_name", "status"], "orders");
   const rows = browser.rows;
@@ -1774,18 +1862,10 @@ function OrdersBrowser({ orders, customers, salesRepresentatives, products, pric
     setModal(null);
   }
 
-  async function printOrder(item) {
-    try {
-      await openOrderPrint(item.id);
-    } catch (error) {
-      window.alert(error?.response?.data?.detail || "Nao foi possivel imprimir o pedido.");
-    }
-  }
-
   function orderActions(item) {
     return (
       <div className="row-actions">
-        <button type="button" onClick={() => printOrder(item)} title="Imprimir pedido"><Printer size={15} /></button>
+        <ReportPrintButton reports={reports} targetScreen="orders" printScope="record" recordId={item.id} />
         <button type="button" onClick={() => setModal({ item, form: toForm(item) })} title="Editar"><Edit3 size={15} /></button>
         <button type="button" onClick={() => window.confirm("Confirma a exclusao?") && run(() => api.delete(`/orders/${item.id}`))} title="Excluir"><Trash2 size={15} /></button>
       </div>
@@ -1793,7 +1873,7 @@ function OrdersBrowser({ orders, customers, salesRepresentatives, products, pric
   }
 
   return (
-    <Browser title="Pedidos" eyebrow="Operacoes" {...browser} onNew={() => setModal({ item: null, form: toForm(null) })}>
+    <Browser title="Pedidos" eyebrow="Operacoes" {...browser} headerActions={<ReportPrintButton reports={reports} targetScreen="orders" printScope="list" className="icon-button" iconSize={17} />} onNew={() => setModal({ item: null, form: toForm(null) })}>
       <OrderLegend />
       <BrowserDataTable browser={browser} items={rows} fallbackColumns={["Pedido", "Tipo", "Cliente", "Vendedor", "Tabela", "Pedido em", "Pagamento", "Entrega", "Total", "Lucro", "Rentab.", "Status", "Acoes"]} fallbackRows={rows.map((item) => ({
         className: orderRowClassName(item),
@@ -1813,7 +1893,7 @@ function OrdersBrowser({ orders, customers, salesRepresentatives, products, pric
           orderActions(item),
         ],
       }))} rowClassName={orderRowClassName} renderActions={orderActions} />
-      {modal && <OrderModal state={modal} setState={setModal} customers={customers} salesRepresentatives={salesRepresentatives} products={products} priceTables={priceTables} warehouses={warehouses} run={run} onSave={save} />}
+      {modal && <OrderModal state={modal} setState={setModal} customers={customers} salesRepresentatives={salesRepresentatives} products={products} priceTables={priceTables} warehouses={warehouses} reports={reports} run={run} onSave={save} />}
     </Browser>
   );
 }
@@ -2001,7 +2081,7 @@ function addDays(dateValue, days) {
   return date.toISOString().slice(0, 10);
 }
 
-function OrderModal({ state, setState, customers, salesRepresentatives, products, priceTables, warehouses, run, onSave }) {
+function OrderModal({ state, setState, customers, salesRepresentatives, products, priceTables, warehouses, reports, run, onSave }) {
   const { item, form } = state;
   const [currentOrder, setCurrentOrder] = useState(item);
   const [itemForm, setItemForm] = useState(emptyOrderItem);
@@ -2175,24 +2255,13 @@ function OrderModal({ state, setState, customers, salesRepresentatives, products
     setItemForm({ product_id: row.product_id || "", warehouse_id: row.warehouse_id || productDefaultWarehouse(row.product_id), quantity: String(row.quantity || "1"), negotiated_unit_price: String(row.negotiated_unit_price || row.corrected_unit_price || "") });
   }
 
-  async function printCurrentOrder() {
-    if (!currentOrder?.id) return;
-    try {
-      await openOrderPrint(currentOrder.id);
-    } catch (error) {
-      window.alert(error?.response?.data?.detail || "Nao foi possivel imprimir o pedido.");
-    }
-  }
-
   return (
     <Modal
       title={currentOrder ? `Editar pedido ${currentOrder.order_number}` : "Novo pedido"}
       onClose={() => setState(null)}
       onSubmit={() => onSave(form, currentOrder)}
       headerActions={currentOrder?.id && (
-        <button type="button" className="icon-button" onClick={printCurrentOrder} title="Imprimir pedido">
-          <Printer size={18} />
-        </button>
+        <ReportPrintButton reports={reports} targetScreen="orders" printScope="record" recordId={currentOrder.id} className="icon-button" iconSize={18} />
       )}
     >
       <div className="modal-grid">
@@ -2344,7 +2413,7 @@ function OrderModal({ state, setState, customers, salesRepresentatives, products
   );
 }
 
-function Browser({ title, eyebrow, filters = [], setFilters, filterFields = [], browserOptions = [], selectedBrowserId, setSelectedBrowserId, onNew, children }) {
+function Browser({ title, eyebrow, filters = [], setFilters, filterFields = [], browserOptions = [], selectedBrowserId, setSelectedBrowserId, headerActions, onNew, children }) {
   const selectedBrowser = browserOptions.find((item) => String(item.id) === String(selectedBrowserId));
   return (
     <section className="panel">
@@ -2354,6 +2423,7 @@ function Browser({ title, eyebrow, filters = [], setFilters, filterFields = [], 
           <h2>{title}</h2>
         </div>
         <div className="browser-actions">
+          {headerActions}
           {onNew && <button className="primary-button" onClick={onNew}><Plus size={17} /> Novo</button>}
         </div>
       </div>

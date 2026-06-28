@@ -675,6 +675,22 @@ h2 {
   font-size: 17px;
 }
 
+.home-widget-header > div {
+  position: relative;
+  padding-left: 11px;
+}
+
+.home-widget-header > div::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 2px;
+  bottom: 2px;
+  width: 3px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, var(--primary), #38bdf8);
+}
+
 .home-shortcuts {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
@@ -682,18 +698,44 @@ h2 {
 }
 
 .home-shortcuts button {
+  --shortcut-accent: #0f766e;
   display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 18px;
+  grid-template-columns: 38px minmax(0, 1fr) 18px;
   align-items: center;
   gap: 10px;
-  min-height: 64px;
-  padding: 11px 12px;
-  border: 1px solid var(--border);
+  min-height: 70px;
+  padding: 11px 13px;
+  border: 1px solid color-mix(in srgb, var(--shortcut-accent) 22%, var(--border));
   border-radius: 7px;
-  background: var(--panel-bg);
+  background: linear-gradient(135deg, color-mix(in srgb, var(--shortcut-accent) 9%, var(--panel-bg)) 0%, var(--panel-bg) 64%);
   color: var(--text);
+  box-shadow: 0 3px 10px rgba(15, 23, 42, 0.05);
   text-align: left;
   cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.home-shortcut.shortcut-customerManagement,
+.home-shortcut.shortcut-customers { --shortcut-accent: #2563eb; }
+.home-shortcut.shortcut-approvals { --shortcut-accent: #d97706; }
+.home-shortcut.shortcut-products { --shortcut-accent: #7c3aed; }
+.home-shortcut.shortcut-priceTables { --shortcut-accent: #0891b2; }
+.home-shortcut.shortcut-reports { --shortcut-accent: #475569; }
+
+.home-shortcut-icon {
+  width: 36px;
+  height: 36px;
+  display: grid !important;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--shortcut-accent) 22%, transparent);
+  border-radius: 7px;
+  color: var(--shortcut-accent);
+  background: color-mix(in srgb, var(--shortcut-accent) 11%, var(--panel-bg));
+}
+
+.home-shortcut-arrow {
+  color: color-mix(in srgb, var(--shortcut-accent) 68%, var(--muted));
+  transition: transform 160ms ease;
 }
 
 .home-shortcuts button:hover,
@@ -701,6 +743,16 @@ h2 {
 .home-order-card:hover,
 .home-customer-card:hover {
   border-color: var(--primary);
+}
+
+.home-shortcuts button:hover {
+  border-color: color-mix(in srgb, var(--shortcut-accent) 56%, var(--border));
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--shortcut-accent) 13%, transparent);
+  transform: translateY(-1px);
+}
+
+.home-shortcuts button:hover .home-shortcut-arrow {
+  transform: translateX(2px);
 }
 
 .home-shortcuts span,
@@ -722,13 +774,23 @@ h2 {
 }
 
 .home-card {
+  --card-accent: #64748b;
   min-height: 88px;
   padding: 13px;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--card-accent) 22%, var(--border));
+  border-left: 4px solid var(--card-accent);
   border-radius: 7px;
-  background: var(--panel-bg);
+  background: linear-gradient(145deg, color-mix(in srgb, var(--card-accent) 8%, var(--panel-bg)), var(--panel-bg) 72%);
+  box-shadow: 0 3px 12px rgba(15, 23, 42, 0.04);
   text-align: left;
   cursor: pointer;
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.home-card:hover {
+  border-color: color-mix(in srgb, var(--card-accent) 48%, var(--border));
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--card-accent) 10%, transparent);
+  transform: translateY(-1px);
 }
 
 .home-card span,
@@ -745,15 +807,15 @@ h2 {
 }
 
 .home-card.warning {
-  border-left: 5px solid #fbbf24;
+  --card-accent: #d97706;
 }
 
 .home-card.danger {
-  border-left: 5px solid #fca5a5;
+  --card-accent: #dc2626;
 }
 
 .home-card.success {
-  border-left: 5px solid #22c55e;
+  --card-accent: #16a34a;
 }
 
 .home-list {
@@ -789,11 +851,16 @@ h2 {
 }
 
 .home-base span {
+  --base-accent: #0f766e;
   padding: 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  background: var(--panel-soft);
+  border: 1px solid color-mix(in srgb, var(--base-accent) 18%, var(--border-soft));
+  border-radius: 7px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--base-accent) 7%, var(--panel-bg)), var(--panel-bg));
 }
+
+.home-base span:nth-child(2) { --base-accent: #7c3aed; }
+.home-base span:nth-child(3) { --base-accent: #0891b2; }
+.home-base span:nth-child(4) { --base-accent: #16a34a; }
 
 .home-base strong {
   color: var(--text);
@@ -808,26 +875,28 @@ h2 {
 }
 
 .home-board-column {
+  --board-accent: #64748b;
   min-width: 0;
   padding: 10px;
-  border: 1px solid var(--border-soft);
-  border-top: 3px solid #64748b;
+  border: 1px solid color-mix(in srgb, var(--board-accent) 20%, var(--border-soft));
+  border-top: 3px solid var(--board-accent);
   border-radius: 7px;
-  background: var(--panel-soft);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--board-accent) 8%, var(--panel-bg)) 0%, var(--panel-soft) 145px);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.04);
 }
 
 .home-board-column.approval,
 .customer-board .attention {
-  border-top-color: #f59e0b;
+  --board-accent: #d97706;
 }
 
 .home-board-column.approved,
 .customer-board .healthy {
-  border-top-color: #16a34a;
+  --board-accent: #16a34a;
 }
 
 .customer-board .critical {
-  border-top-color: #dc2626;
+  --board-accent: #dc2626;
 }
 
 .home-board-column > header {
@@ -842,8 +911,9 @@ h2 {
   min-width: 25px;
   padding: 2px 7px;
   border-radius: 999px;
-  background: var(--panel-bg);
-  color: var(--muted-strong);
+  border: 1px solid color-mix(in srgb, var(--board-accent) 18%, var(--border-soft));
+  background: color-mix(in srgb, var(--board-accent) 9%, var(--panel-bg));
+  color: color-mix(in srgb, var(--board-accent) 72%, var(--text));
   font-size: 12px;
   font-weight: 800;
   text-align: center;
@@ -859,12 +929,21 @@ h2 {
   width: 100%;
   min-width: 0;
   padding: 10px;
-  border: 1px solid var(--border);
+  border: 1px solid color-mix(in srgb, var(--board-accent) 14%, var(--border));
   border-radius: 6px;
-  background: var(--panel-bg);
+  background: linear-gradient(135deg, var(--panel-bg), color-mix(in srgb, var(--board-accent) 5%, var(--panel-bg)));
   color: var(--text);
+  box-shadow: 0 2px 7px rgba(15, 23, 42, 0.035);
   cursor: pointer;
   text-align: left;
+  transition: border-color 150ms ease, box-shadow 150ms ease, transform 150ms ease;
+}
+
+.home-order-card:hover,
+.home-customer-card:hover {
+  border-color: color-mix(in srgb, var(--board-accent) 44%, var(--border));
+  box-shadow: 0 6px 14px color-mix(in srgb, var(--board-accent) 9%, transparent);
+  transform: translateY(-1px);
 }
 
 .home-order-card {
@@ -1449,6 +1528,50 @@ th.sortable-column.desc {
   border-top: 1px solid #e2e8f0;
 }
 
+.modal.report-choice-modal {
+  width: min(520px, 100%);
+}
+
+.report-choice-list {
+  display: grid;
+  gap: 8px;
+  padding: 14px 18px 18px;
+}
+
+.report-choice-list > button {
+  width: 100%;
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--panel-bg);
+  text-align: left;
+  cursor: pointer;
+}
+
+.report-choice-list > button:hover {
+  border-color: var(--primary);
+  background: var(--panel-soft);
+}
+
+.report-choice-list span,
+.report-choice-list strong,
+.report-choice-list small {
+  display: block;
+  min-width: 0;
+}
+
+.report-choice-list small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .modal-grid {
   padding: 18px;
   display: grid;
@@ -1997,6 +2120,19 @@ th.sortable-column.desc {
   background: var(--panel-bg);
   color: var(--text);
   border-color: var(--border);
+}
+
+:root[data-theme="dark"] .home-shortcuts button,
+:root[data-theme="dark"] .home-card,
+:root[data-theme="dark"] .home-board-column,
+:root[data-theme="dark"] .home-order-card,
+:root[data-theme="dark"] .home-customer-card,
+:root[data-theme="dark"] .home-base span {
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.16);
+}
+
+:root[data-theme="dark"] .home-shortcut-icon {
+  color: color-mix(in srgb, var(--shortcut-accent) 68%, #ffffff);
 }
 
 :root[data-theme="dark"] .tabs button {

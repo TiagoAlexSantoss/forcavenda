@@ -8,7 +8,7 @@ from difflib import SequenceMatcher
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest, urlopen
 
-from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from jose import JWTError, jwt
@@ -230,7 +230,9 @@ def user_from_authorization(db: Session, authorization: str | None) -> User | No
 def route_permission(path: str, method: str) -> tuple[str, str] | None:
     if method == "OPTIONS" or path in PUBLIC_PATHS or path.startswith(("/docs", "/openapi", "/redoc")):
         return None
-    if path in {"/auth/me", "/companies", "/home/preferences"}:
+    if path in {"/auth/me", "/companies", "/home/preferences", "/reports/available"}:
+        return None
+    if path.startswith("/reports/") and path.endswith("/print"):
         return None
     action = {"GET": "view", "POST": "create", "PUT": "edit", "PATCH": "edit", "DELETE": "delete"}.get(method)
     if not action:
@@ -868,9 +870,10 @@ def order_assistant_settings(db: Session, company_id: int) -> dict:
         "api_key": None,
         "require_confirmation": True,
         "create_as_draft": True,
+        "send_order_pdf": False,
         "default_payment_days": 30,
         "price_table_id": None,
-        "session_timeout_minutes": 30,
+        "session_timeout_minutes": 10,
     }
     if not item:
         return defaults
@@ -917,6 +920,7 @@ def gemini_extract_order(
     products: list[dict],
     settings_value: dict,
     recent_products: list[dict] | None = None,
+    conversation_history: list[dict] | None = None,
 ) -> dict:
     api_key = settings_value.get("api_key")
     model = settings_value.get("model") or "gemini-2.5-flash"
@@ -936,6 +940,14 @@ def gemini_extract_order(
         if recent_product_catalog
         else ""
     )
+    history_instruction = (
+        "Historico recente desta mesma conversa: "
+        f"{json.dumps(conversation_history, ensure_ascii=False)}. "
+        "Use o historico para manter cliente, produtos, quantidades e condicoes ja informados. "
+        "A mensagem atual tem prioridade quando corrigir, remover, trocar ou acrescentar algo. "
+        if conversation_history
+        else ""
+    )
     prompt = (
         "Extraia um pedido comercial da mensagem. Responda somente JSON valido com: "
         '{"customer":"texto ou null","items":[{"product":"texto","quantity":numero}],'
@@ -944,6 +956,7 @@ def gemini_extract_order(
         "Quando o usuario disser 'de cada', aplique a mesma quantidade a todos os produtos referenciados. "
         "Use payment_days como o maior prazo ou null quando nenhum prazo for informado. "
         f"{recent_instruction}"
+        f"{history_instruction}"
         "Nao invente cliente nem produto. Catalogo de clientes: "
         f"{json.dumps(customer_catalog, ensure_ascii=False)}. Catalogo de produtos: "
         f"{json.dumps(product_catalog, ensure_ascii=False)}. Mensagem: {message}"
@@ -1111,19 +1124,17 @@ def assistant_quantity_near_product(product: dict, normalized_message: str) -> D
     for term in [normalize_search(str(product.get("sku") or "")), *assistant_product_terms(product)]:
         if not term:
             continue
-        index = normalized_message.find(term)
-        if index >= 0:
-            positions.append(index)
+        positions.extend(match.start() for match in re.finditer(re.escape(term), normalized_message))
     if not positions:
         return None
-    index = min(positions)
-    before = normalized_message[max(0, index - 50):index]
-    matches = re.findall(r"\b(\d+(?:[,.]\d+)?)\b(?:\s+unidades?)?(?:\s+de)?\s*$", before)
-    if not matches:
-        matches = re.findall(r"\b(\d+(?:[,.]\d+)?)\b", before)
-    if not matches:
-        return None
-    return Decimal(matches[-1].replace(",", "."))
+    for index in sorted(set(positions), reverse=True):
+        before = normalized_message[max(0, index - 50):index]
+        matches = re.findall(r"\b(\d+(?:[,.]\d+)?)\b(?:\s+unidades?)?(?:\s+de)?\s*$", before)
+        if not matches:
+            matches = re.findall(r"\b(\d+(?:[,.]\d+)?)\b", before)
+        if matches:
+            return Decimal(matches[-1].replace(",", "."))
+    return None
 
 
 def assistant_shared_quantity(normalized_message: str) -> Decimal | None:
@@ -1195,7 +1206,14 @@ def build_assistant_draft(
         extracted = deterministic_assistant_extraction(message, customers, products, recent_products, settings_value)
     else:
         try:
-            extracted = gemini_extract_order(message, customers, products, settings_value, recent_products=recent_products)
+            extracted = gemini_extract_order(
+                message,
+                customers,
+                products,
+                settings_value,
+                recent_products=recent_products,
+                conversation_history=assistant_conversation_history(memory or {}),
+            )
         except RuntimeError as exc:
             if "429" not in str(exc) and "rate" not in str(exc).lower():
                 raise
@@ -1408,6 +1426,20 @@ def apply_assistant_draft_update(db: Session, draft: dict, message_text: str) ->
     return draft, changed
 
 
+def assistant_requests_contextual_item_update(draft: dict, message_text: str) -> bool:
+    normalized = normalize_search(message_text)
+    item_mentioned = any(
+        assistant_product_mentioned(item, normalized)
+        for item in draft.get("items") or []
+    )
+    adds_or_replaces = any(
+        term in normalized
+        for term in ("adicion", "inclu", "acrescent", "troca", "substitu")
+    )
+    changes_quantity = item_mentioned and bool(re.search(r"\b\d+(?:[,.]\d+)?\b", normalized))
+    return adds_or_replaces or changes_quantity
+
+
 def is_assistant_catalog_request(normalized_message: str) -> bool:
     catalog_commands = (
         "catalogo",
@@ -1458,6 +1490,29 @@ def assistant_session_memory(session: WhatsappOrderSession | None) -> dict:
     return dict(session.draft or {}) if session and isinstance(session.draft, dict) else {}
 
 
+def assistant_conversation_history(memory: dict) -> list[dict]:
+    history = memory.get("conversation_history") or []
+    if not isinstance(history, list):
+        return []
+    cleaned = []
+    for turn in history[-12:]:
+        if not isinstance(turn, dict) or turn.get("role") not in {"user", "assistant"}:
+            continue
+        content = str(turn.get("content") or "").strip()
+        if content:
+            cleaned.append({"role": turn["role"], "content": content[:1200]})
+    return cleaned
+
+
+def remember_assistant_turn(memory: dict, role: str, content: str) -> dict:
+    history = assistant_conversation_history(memory)
+    text_value = str(content or "").strip()
+    if text_value:
+        history.append({"role": role, "content": text_value[:1200]})
+    memory["conversation_history"] = history[-12:]
+    return memory
+
+
 def assistant_recent_products(memory: dict) -> list[dict]:
     products = memory.get("recent_products") or []
     if not isinstance(products, list):
@@ -1485,6 +1540,18 @@ def assistant_pending_order_message(memory: dict) -> str | None:
     return str(value).strip() if value else None
 
 
+def is_assistant_incomplete_order_error(detail: str) -> bool:
+    normalized = normalize_search(detail)
+    return any(
+        marker in normalized
+        for marker in (
+            "nao identifiquei com seguranca o cliente",
+            "nao identifiquei produto ou quantidade",
+            "nao encontrei produtos e quantidades",
+        )
+    )
+
+
 def assistant_order_followup_message(memory: dict, message_text: str) -> str:
     pending = assistant_pending_order_message(memory)
     if not pending:
@@ -1493,6 +1560,20 @@ def assistant_order_followup_message(memory: dict, message_text: str) -> str:
     if normalized in ASSISTANT_RESET_COMMANDS or normalized in ASSISTANT_CANCEL_COMMANDS:
         return message_text
     return f"{pending}\nComplemento do usuario: {message_text}"
+
+
+def assistant_draft_update_message(draft: dict, instruction: str) -> str:
+    items = "; ".join(
+        f"{item.get('quantity')} x {item.get('sku')} {item.get('name')}"
+        for item in draft.get("items") or []
+    )
+    payment_terms = draft.get("payment_terms") or [draft.get("payment_days")]
+    payment = "/".join(str(value) for value in payment_terms if value is not None)
+    return (
+        f"Pedido atual: cliente {draft.get('customer_name')}; itens: {items}; pagamento: {payment} dias. "
+        f"Nova mensagem do usuario: {instruction}. "
+        "Retorne o pedido completo depois de aplicar a nova mensagem. Preserve exatamente os dados que ela nao alterou."
+    )
 
 
 def save_assistant_session_memory(
@@ -1550,11 +1631,7 @@ def save_assistant_module_session(
     expires_at: datetime,
     session: WhatsappOrderSession | None = None,
 ) -> WhatsappOrderSession:
-    memory = assistant_session_memory(session)
-    if selected_module:
-        memory["selected_module"] = selected_module
-    else:
-        memory = {}
+    memory = {"selected_module": selected_module} if selected_module else {}
     return save_assistant_session_memory(db, representative, phone, memory, message_text, expires_at, session)
 
 
@@ -2354,6 +2431,264 @@ def jsreport_request(path: str, payload: dict, timeout: int = 90) -> tuple[bytes
         raise HTTPException(status_code=502, detail=f"jsreport retornou erro {exc.code}: {detail}") from exc
     except URLError as exc:
         raise HTTPException(status_code=502, detail=f"jsreport indisponivel: {exc.reason}") from exc
+
+
+SALES_REPORT_JSREPORT_HELPERS = r"""
+function valueOf(row, field) {
+  if (!row || !field) return null
+  return row[field]
+}
+function groupValue(value, mode) {
+  if (value === null || value === undefined || value === '') return '(Sem valor)'
+  if (mode === 'value') return String(value)
+  var text = String(value)
+  var match = text.match(/^(\d{4})-(\d{2})-(\d{2})/)
+  var date = match ? new Date(Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))) : new Date(value)
+  if (Number.isNaN(date.getTime())) return text
+  if (mode === 'year') return String(date.getUTCFullYear())
+  if (mode === 'month') return date.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric', timeZone: 'UTC' })
+  if (mode === 'day') return date.toLocaleDateString('pt-BR', { timeZone: 'UTC' })
+  return text
+}
+function groupRows(rows, field, mode, direction) {
+  var groups = []
+  var positions = Object.create(null)
+  ;(rows || []).forEach(function (row) {
+    var key = groupValue(valueOf(row, field), mode || 'value')
+    if (positions[key] === undefined) {
+      positions[key] = groups.length
+      groups.push({ key: key, rows: [] })
+    }
+    groups[positions[key]].rows.push(row)
+  })
+  groups.sort(function (left, right) {
+    var comparison = String(left.key).localeCompare(String(right.key), 'pt-BR', { numeric: true, sensitivity: 'base' })
+    return direction === 'desc' ? -comparison : comparison
+  })
+  return groups
+}
+function rowCount(rows) { return (rows || []).length }
+function numberOf(value) {
+  if (value === null || value === undefined || value === '') return 0
+  if (typeof value === 'number') return value
+  var normalized = String(value).replace(/[^\d,.-]/g, '').replace(/\./g, '').replace(',', '.')
+  var parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : 0
+}
+function evalExpression(expression, row) {
+  var scope = row || {}
+  var keys = Object.keys(scope).filter(function (key) { return /^[A-Za-z_][A-Za-z0-9_]*$/.test(key) })
+  var values = keys.map(function (key) { return numberOf(scope[key]) })
+  try { return Function(keys.join(','), '"use strict"; return (' + expression + ')').apply(null, values) }
+  catch (e) { return 0 }
+}
+function formatValue(value, format) {
+  if (format === 'number') return numberOf(value).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
+  if (format === 'money') return numberOf(value).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+  if (format === 'date' && value) {
+    var date = new Date(value)
+    return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('pt-BR')
+  }
+  return value === null || value === undefined ? '' : value
+}
+function fmt(field, format, row) { return formatValue(valueOf(row, field), format) }
+function fmtCalc(expression, format, row) { return formatValue(evalExpression(expression, row), format) }
+function fmtSum(rows, field, format) {
+  var total = (rows || []).reduce(function (sum, row) { return sum + numberOf(valueOf(row, field)) }, 0)
+  return formatValue(total, format)
+}
+function fmtSumCalc(rows, expression, format) {
+  var total = (rows || []).reduce(function (sum, row) { return sum + numberOf(evalExpression(expression, row)) }, 0)
+  return formatValue(total, format)
+}
+"""
+
+
+def render_sales_order_pdf(db: Session, order: SalesOrder) -> tuple[bytes, str]:
+    template = report_template_body(db, "sales_order_pdf")
+    return jsreport_request(
+        "/api/report",
+        {
+            "template": {
+                "content": template,
+                "engine": "handlebars",
+                "recipe": "chrome-pdf",
+                "chrome": {"printBackground": True, "format": "A4"},
+            },
+            "data": sales_order_report_data(db, order),
+        },
+    )
+
+
+def sales_screen_report(db: Session, report_id: int, target_screen: str) -> dict:
+    report = db.execute(
+        text(
+            """
+            SELECT id, code, name, COALESCE(menu_label, name) AS menu_label,
+                   template_body, output_format, data_sql, source_mode, target_screen,
+                   COALESCE(print_scope, 'list') AS print_scope
+            FROM control_report_definitions
+            WHERE id = :report_id
+              AND active = TRUE
+              AND target_app = 'easysales'
+              AND target_screen = :target_screen
+            """
+        ),
+        {"report_id": report_id, "target_screen": target_screen},
+    ).mappings().first()
+    if not report or not (report.get("template_body") or "").strip():
+        raise HTTPException(status_code=404, detail="Relatorio ativo nao encontrado para esta tela.")
+    return dict(report)
+
+
+def render_sales_order_report(db: Session, order: SalesOrder, report: dict) -> tuple[bytes, str]:
+    output_format = report.get("output_format") or "pdf"
+    recipe = "chrome-pdf" if output_format == "pdf" else "html"
+    template = {
+        "content": report["template_body"],
+        "engine": "handlebars",
+        "recipe": recipe,
+        "helpers": SALES_REPORT_JSREPORT_HELPERS,
+    }
+    if output_format == "pdf":
+        template["chrome"] = {"printBackground": True, "format": "A4"}
+    return jsreport_request(
+        "/api/report",
+        {"template": template, "data": sales_order_report_data(db, order)},
+    )
+
+
+def sales_report_query_data(db: Session, report: dict) -> dict:
+    query = str(report.get("data_sql") or "").strip().rstrip(";")
+    lowered = query.lower()
+    forbidden = (" insert ", " update ", " delete ", " drop ", " alter ", " create ", " truncate ", " grant ", " revoke ", " call ", " execute ")
+    if not query or not (lowered.startswith("select") or lowered.startswith("with")):
+        raise HTTPException(status_code=400, detail="O relatorio nao possui uma SQL de leitura valida.")
+    if ";" in query or any(token in f" {lowered} " for token in forbidden):
+        raise HTTPException(status_code=400, detail="A SQL do relatorio deve conter apenas consulta de leitura.")
+    result = db.execute(text(f"SELECT * FROM ({query}) AS easysales_report LIMIT 5000"))
+    columns = list(result.keys())
+    rows = [dict(row) for row in result.mappings().all()]
+    return {
+        "title": report.get("menu_label") or report.get("name") or "Relatorio",
+        "generated_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "columns": columns,
+        "rows": rows,
+    }
+
+
+def render_sales_list_report(db: Session, report: dict) -> tuple[bytes, str]:
+    output_format = report.get("output_format") or "pdf"
+    recipe = "chrome-pdf" if output_format == "pdf" else "html"
+    template = {
+        "content": report["template_body"],
+        "engine": "handlebars",
+        "recipe": recipe,
+        "helpers": SALES_REPORT_JSREPORT_HELPERS,
+    }
+    if output_format == "pdf":
+        template["chrome"] = {"printBackground": True, "format": "A4"}
+    return jsreport_request(
+        "/api/report",
+        {"template": template, "data": sales_report_query_data(db, report)},
+        timeout=120,
+    )
+
+
+def send_evolution_document(
+    whatsapp_number: str,
+    content: bytes,
+    filename: str,
+    caption: str,
+    instance_name: str,
+) -> None:
+    instance = (instance_name or "").strip()
+    if not instance or not re.fullmatch(r"[A-Za-z0-9_-]+", instance):
+        raise RuntimeError("Instancia Evolution invalida")
+    payload = {
+        "number": normalize_phone(whatsapp_number),
+        "mediatype": "document",
+        "mimetype": "application/pdf",
+        "fileName": filename,
+        "caption": caption,
+        "media": base64.b64encode(content).decode("ascii"),
+    }
+    request_data = UrlRequest(
+        f"{settings.evolution_base_url.rstrip('/')}/message/sendMedia/{instance}",
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json", "apikey": settings.evolution_api_key},
+    )
+    try:
+        with urlopen(request_data, timeout=90) as response:
+            response.read()
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")[:500]
+        raise RuntimeError(f"Evolution retornou erro {exc.code}: {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Evolution indisponivel: {exc.reason}") from exc
+
+
+def send_evolution_text_message(whatsapp_number: str, message: str, instance_name: str) -> None:
+    instance = (instance_name or "").strip()
+    if not instance or not re.fullmatch(r"[A-Za-z0-9_-]+", instance):
+        raise RuntimeError("Instancia Evolution invalida")
+    request_data = UrlRequest(
+        f"{settings.evolution_base_url.rstrip('/')}/message/sendText/{instance}",
+        data=json.dumps({"number": normalize_phone(whatsapp_number), "text": message}).encode("utf-8"),
+        method="POST",
+        headers={"Content-Type": "application/json", "apikey": settings.evolution_api_key},
+    )
+    with urlopen(request_data, timeout=30) as response:
+        response.read()
+
+
+def send_assistant_order_pdf_background(order_id: int, representative_id: int, instance_name: str) -> None:
+    db = SessionLocal()
+    representative = None
+    try:
+        order = db.get(SalesOrder, order_id)
+        representative = db.get(SalesRepresentative, representative_id)
+        if not order or not representative:
+            raise RuntimeError("Pedido ou vendedor nao encontrado para envio do PDF")
+        content, _content_type = render_sales_order_pdf(db, order)
+        send_evolution_document(
+            representative.whatsapp_number,
+            content,
+            f"pedido-{order.order_number}.pdf",
+            f"Pedido {order.order_number} - {order.customer_name}",
+            instance_name,
+        )
+    except Exception as exc:
+        print(f"[assistant][pdf] pedido={order_id} falha={exc}", flush=True)
+        if representative:
+            try:
+                send_evolution_text_message(
+                    representative.whatsapp_number,
+                    "Nao consegui enviar o PDF do pedido agora. O pedido continua salvo e disponivel no EasySales.",
+                    instance_name,
+                )
+            except Exception as notify_exc:
+                print(f"[assistant][pdf] falha ao avisar vendedor={representative_id}: {notify_exc}", flush=True)
+    finally:
+        db.close()
+
+
+def schedule_assistant_order_pdf(
+    background_tasks: BackgroundTasks,
+    order: SalesOrder,
+    representative: SalesRepresentative,
+    settings_value: dict,
+) -> str:
+    if not settings_value.get("send_order_pdf", False):
+        return ""
+    background_tasks.add_task(
+        send_assistant_order_pdf_background,
+        order.id,
+        representative.id,
+        settings_value.get("evolution_instance") or "sales-teste",
+    )
+    return "\n\nVou gerar e enviar o PDF do pedido por aqui."
 
 
 def format_report_date(value: date | datetime | None) -> str:
@@ -3528,7 +3863,11 @@ def sales_representative_whatsapp_context(
     response_model=WhatsappAssistantResponse,
     tags=["Assistente WhatsApp"],
 )
-def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Session = Depends(get_db)):
+def process_whatsapp_order_message(
+    payload: WhatsappAssistantMessage,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
     phone = normalize_phone(payload.whatsapp_number)
     representative = db.scalar(
         select(SalesRepresentative).where(
@@ -3643,7 +3982,15 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
         if recent_products:
             memory["recent_products"] = recent_products
             memory["last_intent"] = "catalog"
-        save_assistant_session_memory(db, representative, phone, memory, message_text, expires_at, session)
+        remember_assistant_turn(memory, "user", message_text)
+        remember_assistant_turn(memory, "assistant", reply)
+        if session and session.state == "awaiting_confirmation":
+            session.draft = memory
+            session.last_message = message_text
+            session.expires_at = expires_at
+            db.commit()
+        else:
+            save_assistant_session_memory(db, representative, phone, memory, message_text, expires_at, session)
         return {
             "reply": reply + session_notice,
             "state": "catalog",
@@ -3657,7 +4004,87 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
             updated_draft = session.draft
             draft_changed = False
             draft_update_error = exc.detail if isinstance(exc, HTTPException) else str(exc)
-        if draft_changed:
+        if draft_changed and not assistant_requests_contextual_item_update(session.draft or {}, message_text):
+            remember_assistant_turn(updated_draft, "user", message_text)
+            if assistant_confirmation_requested(normalized_message):
+                session.draft = updated_draft
+                session.last_message = message_text
+                session.expires_at = expires_at
+                order = create_order_from_assistant(db, representative, session.draft)
+                session.order_id = order.id
+                session.state = "completed"
+                db.commit()
+                db.refresh(order)
+                pdf_note = schedule_assistant_order_pdf(background_tasks, order, representative, settings_value)
+                return {
+                    "reply": f"Atualizei as condicoes e criei o pedido {order.order_number} como rascunho no EasySales. Total R$ {Decimal(order.total_amount):.2f}.{pdf_note}",
+                    "state": "completed",
+                    "sales_representative_id": representative.id,
+                    "order_id": order.id,
+                    "order_number": order.order_number,
+                }
+            summary = assistant_summary(updated_draft)
+            remember_assistant_turn(updated_draft, "assistant", summary)
+            session.draft = updated_draft
+            session.last_message = message_text
+            session.expires_at = expires_at
+            db.commit()
+            return {
+                "reply": summary + session_notice,
+                "state": "awaiting_confirmation",
+                "sales_representative_id": representative.id,
+            }
+        if draft_update_error:
+            memory = assistant_session_memory(session)
+            remember_assistant_turn(memory, "user", message_text)
+            reply = f"Nao consegui aplicar a alteracao: {draft_update_error}. O pedido atual foi mantido; envie a alteracao novamente."
+            remember_assistant_turn(memory, "assistant", reply)
+            session.draft = memory
+            session.last_message = message_text
+            session.expires_at = expires_at
+            db.commit()
+            return {
+                "reply": reply + session_notice,
+                "state": "awaiting_confirmation",
+                "sales_representative_id": representative.id,
+            }
+        if (
+            not assistant_requests_contextual_item_update(session.draft or {}, message_text)
+            and (normalized_message in {"s", "ok"} or assistant_confirmation_requested(normalized_message))
+        ):
+            order = create_order_from_assistant(db, representative, session.draft)
+            session.order_id = order.id
+            session.state = "completed"
+            db.commit()
+            db.refresh(order)
+            pdf_note = schedule_assistant_order_pdf(background_tasks, order, representative, settings_value)
+            return {
+                "reply": f"Pedido {order.order_number} criado como rascunho no EasySales. Total R$ {Decimal(order.total_amount):.2f}.{pdf_note}",
+                "state": "completed",
+                "sales_representative_id": representative.id,
+                "order_id": order.id,
+                "order_number": order.order_number,
+            }
+        try:
+            memory = assistant_session_memory(session)
+            contextual_message = assistant_draft_update_message(memory, message_text)
+            updated_draft = build_assistant_draft(
+                db,
+                representative,
+                contextual_message,
+                settings_value,
+                memory=memory,
+            )
+            updated_draft["selected_module"] = "sales"
+            updated_draft["last_intent"] = "order_draft"
+            updated_draft["recent_products"] = [
+                {"id": item["product_id"], "sku": item["sku"], "name": item["name"]}
+                for item in updated_draft["items"]
+            ]
+            updated_draft["conversation_history"] = assistant_conversation_history(memory)
+            remember_assistant_turn(updated_draft, "user", message_text)
+            summary = assistant_summary(updated_draft)
+            remember_assistant_turn(updated_draft, "assistant", summary)
             session.draft = updated_draft
             session.last_message = message_text
             session.expires_at = expires_at
@@ -3667,8 +4094,9 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
                 session.state = "completed"
                 db.commit()
                 db.refresh(order)
+                pdf_note = schedule_assistant_order_pdf(background_tasks, order, representative, settings_value)
                 return {
-                    "reply": f"Atualizei as condicoes e criei o pedido {order.order_number} como rascunho no EasySales. Total R$ {Decimal(order.total_amount):.2f}.",
+                    "reply": f"Atualizei o pedido e criei {order.order_number} como rascunho no EasySales. Total R$ {Decimal(order.total_amount):.2f}.{pdf_note}",
                     "state": "completed",
                     "sales_representative_id": representative.id,
                     "order_id": order.id,
@@ -3676,34 +4104,25 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
                 }
             db.commit()
             return {
-                "reply": assistant_summary(session.draft) + session_notice,
+                "reply": summary + session_notice,
                 "state": "awaiting_confirmation",
                 "sales_representative_id": representative.id,
             }
-        if draft_update_error:
-            return {
-                "reply": f"Nao consegui aplicar a alteracao: {draft_update_error}. Responda SIM para criar, CANCELAR para cancelar ou envie a alteracao novamente.",
-                "state": "awaiting_confirmation",
-                "sales_representative_id": representative.id,
-            }
-        if normalized_message in {"sim", "s", "confirmar", "confirmo", "pode criar", "ok"}:
-            order = create_order_from_assistant(db, representative, session.draft)
-            session.order_id = order.id
-            session.state = "completed"
+        except (HTTPException, RuntimeError, ValueError, KeyError) as exc:
+            detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
+            memory = assistant_session_memory(session)
+            remember_assistant_turn(memory, "user", message_text)
+            reply = f"Nao consegui entender a alteracao com seguranca: {detail}. O pedido atual foi mantido; pode explicar de outra forma."
+            remember_assistant_turn(memory, "assistant", reply)
+            session.draft = memory
+            session.last_message = message_text
+            session.expires_at = expires_at
             db.commit()
-            db.refresh(order)
             return {
-                "reply": f"Pedido {order.order_number} criado como rascunho no EasySales. Total R$ {Decimal(order.total_amount):.2f}.",
-                "state": "completed",
+                "reply": reply + session_notice,
+                "state": "awaiting_confirmation",
                 "sales_representative_id": representative.id,
-                "order_id": order.id,
-                "order_number": order.order_number,
             }
-        return {
-            "reply": "Responda SIM para criar o pedido ou CANCELAR. Para alterar, cancele e envie o pedido novamente.",
-            "state": "awaiting_confirmation",
-            "sales_representative_id": representative.id,
-        }
     try:
         memory = assistant_session_memory(session)
         memory["recent_products"] = assistant_recent_products(memory)
@@ -3711,15 +4130,14 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
         draft = build_assistant_draft(db, representative, order_message, settings_value, memory=memory)
     except (HTTPException, RuntimeError, ValueError) as exc:
         detail = exc.detail if isinstance(exc, HTTPException) else str(exc)
-        if detail in {
-            "Nao identifiquei com seguranca o cliente da sua carteira. Informe o nome do cliente.",
-            "Nao encontrei produtos e quantidades na mensagem.",
-        }:
+        if is_assistant_incomplete_order_error(detail):
             memory = assistant_session_memory(session)
             memory["selected_module"] = "sales"
             memory["recent_products"] = assistant_recent_products(memory)
             memory["pending_order_message"] = assistant_order_followup_message(memory, message_text)
             memory["last_intent"] = "pending_order"
+            remember_assistant_turn(memory, "user", message_text)
+            remember_assistant_turn(memory, "assistant", detail)
             save_assistant_session_memory(db, representative, phone, memory, message_text, expires_at, session)
         return {
             "reply": detail,
@@ -3734,7 +4152,9 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
         {"id": item["product_id"], "sku": item["sku"], "name": item["name"]}
         for item in draft["items"]
     ]
+    remember_assistant_turn(draft_memory, "user", message_text)
     draft.update(draft_memory)
+    remember_assistant_turn(draft, "assistant", assistant_summary(draft))
     session = WhatsappOrderSession(
         company_id=representative.company_id,
         sales_representative_id=representative.id,
@@ -3752,8 +4172,10 @@ def process_whatsapp_order_message(payload: WhatsappAssistantMessage, db: Sessio
         session.order_id = order.id
         session.state = "completed"
         db.commit()
+        db.refresh(order)
+        pdf_note = schedule_assistant_order_pdf(background_tasks, order, representative, settings_value)
         return {
-            "reply": f"Pedido {order.order_number} criado como rascunho no EasySales.",
+            "reply": f"Pedido {order.order_number} criado como rascunho no EasySales.{pdf_note}",
             "state": "completed",
             "sales_representative_id": representative.id,
             "order_id": order.id,
@@ -3793,6 +4215,7 @@ def whatsapp_order_assistant_status(request: Request, db: Session = Depends(get_
         "model": settings_value["model"],
         "require_confirmation": settings_value["require_confirmation"],
         "create_as_draft": settings_value["create_as_draft"],
+        "send_order_pdf": settings_value["send_order_pdf"],
         "default_payment_days": settings_value["default_payment_days"],
         "price_table_id": settings_value["price_table_id"],
         "api_configured": bool(settings_value.get("api_key")),
@@ -4811,9 +5234,11 @@ def sales_reports_menu(db: Session = Depends(get_db)):
                 COALESCE(r.menu_label, r.name) AS menu_label,
                 r.description,
                 r.source_mode,
+                COALESCE(r.print_scope, 'list') AS print_scope,
                 r.target_screen,
                 r.output_format,
                 r.ordinal,
+                r.show_in_menu,
                 e.display_name AS entity_name,
                 b.name AS browser_name
             FROM control_report_definitions r
@@ -4829,26 +5254,76 @@ def sales_reports_menu(db: Session = Depends(get_db)):
     return [dict(row) for row in rows]
 
 
+@app.get("/reports/available", tags=["Relatorios"])
+def available_sales_reports(db: Session = Depends(get_db)):
+    rows = db.execute(
+        text(
+            """
+            SELECT
+                r.id,
+                r.code,
+                r.name,
+                COALESCE(r.menu_label, r.name) AS menu_label,
+                r.description,
+                r.source_mode,
+                COALESCE(r.print_scope, 'list') AS print_scope,
+                r.target_screen,
+                r.output_format,
+                r.ordinal,
+                r.show_in_menu,
+                e.display_name AS entity_name,
+                b.name AS browser_name
+            FROM control_report_definitions r
+            JOIN control_metadata_entities e ON e.id = r.entity_id
+            LEFT JOIN control_browser_definitions b ON b.id = r.browser_id
+            WHERE r.active = TRUE
+              AND r.target_app = 'easysales'
+            ORDER BY r.target_screen ASC, r.ordinal ASC, COALESCE(r.menu_label, r.name) ASC
+            """
+        )
+    ).mappings().all()
+    return [dict(row) for row in rows]
+
+
+@app.get("/reports/{report_id}/print", tags=["Relatorios"])
+def print_sales_list_report(report_id: int, target_screen: str, db: Session = Depends(get_db)):
+    report = sales_screen_report(db, report_id, target_screen)
+    if report.get("print_scope") != "list":
+        raise HTTPException(status_code=400, detail="Este relatorio foi configurado para impressao individual.")
+    content, content_type = render_sales_list_report(db, report)
+    extension = "pdf" if (report.get("output_format") or "pdf") == "pdf" else "html"
+    filename = f"{report['code']}.{extension}"
+    return Response(
+        content=content,
+        media_type=content_type or ("application/pdf" if extension == "pdf" else "text/html"),
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
 @app.get("/orders/{order_id}/print", tags=["Pedidos"])
 def print_order(order_id: int, request: Request, db: Session = Depends(get_db)):
     order = order_for_company_or_404(db, order_id, active_company_id(request, db))
-    template = report_template_body(db, "sales_order_pdf")
-    content, content_type = jsreport_request(
-        "/api/report",
-        {
-            "template": {
-                "content": template,
-                "engine": "handlebars",
-                "recipe": "chrome-pdf",
-                "chrome": {"printBackground": True, "format": "A4"},
-            },
-            "data": sales_order_report_data(db, order),
-        },
-    )
+    content, content_type = render_sales_order_pdf(db, order)
     filename = f"pedido-{order.order_number}.pdf"
     return Response(
         content=content,
         media_type=content_type or "application/pdf",
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
+@app.get("/orders/{order_id}/reports/{report_id}/print", tags=["Pedidos"])
+def print_order_report(order_id: int, report_id: int, request: Request, db: Session = Depends(get_db)):
+    order = order_for_company_or_404(db, order_id, active_company_id(request, db))
+    report = sales_screen_report(db, report_id, "orders")
+    if report.get("print_scope") != "record":
+        raise HTTPException(status_code=400, detail="Este relatorio foi configurado para impressao de lista.")
+    content, content_type = render_sales_order_report(db, order, report)
+    extension = "pdf" if (report.get("output_format") or "pdf") == "pdf" else "html"
+    filename = f"{report['code']}-{order.order_number}.{extension}"
+    return Response(
+        content=content,
+        media_type=content_type or ("application/pdf" if extension == "pdf" else "text/html"),
         headers={"Content-Disposition": f'inline; filename="{filename}"'},
     )
 
