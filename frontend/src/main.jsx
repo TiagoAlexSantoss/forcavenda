@@ -82,8 +82,8 @@ async function openOrderPrint(orderId, reportId = null) {
   window.setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 
-async function openListReportPrint(report) {
-  const response = await api.get(`/reports/${report.id}/print`, {
+async function openListReportPrint(report, parameters = {}) {
+  const response = await api.post(`/reports/${report.id}/print`, { parameters }, {
     params: { target_screen: report.target_screen },
     responseType: "blob",
   });
@@ -1747,6 +1747,8 @@ function CustomerModal({ state, setState, customerProfiles, salesRepresentatives
 function ReportPrintButton({ reports = [], targetScreen, printScope, recordId = null, className = "", iconSize = 15, showLabel = false }) {
   const [chooserOpen, setChooserOpen] = useState(false);
   const [loadingId, setLoadingId] = useState(null);
+  const [parameterReport, setParameterReport] = useState(null);
+  const [parameterValues, setParameterValues] = useState({});
   const availableReports = useMemo(
     () => reports
       .filter((report) => report.target_screen === targetScreen && (report.print_scope || "list") === printScope)
@@ -1756,11 +1758,18 @@ function ReportPrintButton({ reports = [], targetScreen, printScope, recordId = 
 
   if (!availableReports.length) return null;
 
-  async function printReport(report) {
+  async function printReport(report, suppliedParameters = null) {
+    const definitions = report.parameters || [];
+    if (!recordId && definitions.length && suppliedParameters === null) {
+      setParameterReport(report);
+      setParameterValues(Object.fromEntries(definitions.map((parameter) => [parameter.name, parameter.default ?? ""])));
+      setChooserOpen(false);
+      return;
+    }
     setLoadingId(report.id);
     try {
       if (recordId) await openOrderPrint(recordId, report.id);
-      else await openListReportPrint(report);
+      else await openListReportPrint(report, suppliedParameters || {});
       setChooserOpen(false);
     } catch (error) {
       window.alert(error?.response?.data?.detail || "Nao foi possivel gerar o relatorio.");
@@ -1797,6 +1806,21 @@ function ReportPrintButton({ reports = [], targetScreen, printScope, recordId = 
     </div>,
     document.body,
   );
+  const parameterDialog = parameterReport && createPortal(
+    <div className="modal-backdrop">
+      <form className="modal report-parameter-modal" onSubmit={(event) => { event.preventDefault(); printReport(parameterReport, parameterValues); }}>
+        <header><div><p className="eyebrow compact">Filtros</p><h2>{parameterReport.menu_label || parameterReport.name}</h2></div><button type="button" className="icon-button" onClick={() => setParameterReport(null)}><X size={18} /></button></header>
+        <div className="modal-grid">
+          {(parameterReport.parameters || []).map((parameter) => (
+            <Field key={parameter.name} label={parameter.label || parameter.name}>
+              {parameter.type === "select" ? <select required={parameter.required} value={parameterValues[parameter.name] ?? ""} onChange={(event) => setParameterValues({ ...parameterValues, [parameter.name]: event.target.value })}><option value="">Selecione</option>{(parameter.options || []).map((option) => <option key={option} value={option}>{option}</option>)}</select> : parameter.type === "boolean" ? <select required={parameter.required} value={parameterValues[parameter.name] ?? ""} onChange={(event) => setParameterValues({ ...parameterValues, [parameter.name]: event.target.value })}><option value="">Todos</option><option value="true">Sim</option><option value="false">Nao</option></select> : <input required={parameter.required} type={parameter.type === "date" ? "date" : parameter.type === "number" ? "number" : "text"} value={parameterValues[parameter.name] ?? ""} onChange={(event) => setParameterValues({ ...parameterValues, [parameter.name]: event.target.value })} />}
+            </Field>
+          ))}
+        </div>
+        <footer><button type="button" className="secondary-button" onClick={() => setParameterReport(null)}>Cancelar</button><button type="submit" className="primary-button" disabled={loadingId !== null}>{loadingId ? "Gerando..." : "Gerar relatorio"}</button></footer>
+      </form>
+    </div>, document.body,
+  );
 
   return (
     <>
@@ -1811,6 +1835,7 @@ function ReportPrintButton({ reports = [], targetScreen, printScope, recordId = 
         {showLabel && <span>Imprimir</span>}
       </button>
       {chooser}
+      {parameterDialog}
     </>
   );
 }

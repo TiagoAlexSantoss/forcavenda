@@ -1532,6 +1532,10 @@ th.sortable-column.desc {
   width: min(520px, 100%);
 }
 
+.modal.report-parameter-modal {
+  width: min(680px, 100%);
+}
+
 .report-choice-list {
   display: grid;
   gap: 8px;

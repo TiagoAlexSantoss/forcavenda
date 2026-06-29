@@ -2485,6 +2485,7 @@ function evalExpression(expression, row) {
 function formatValue(value, format) {
   if (format === 'number') return numberOf(value).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })
   if (format === 'money') return numberOf(value).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })
+  if (format === 'percent') return numberOf(value).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%'
   if (format === 'date' && value) {
     var date = new Date(value)
     return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString('pt-BR')
@@ -2497,11 +2498,42 @@ function fmtSum(rows, field, format) {
   var total = (rows || []).reduce(function (sum, row) { return sum + numberOf(valueOf(row, field)) }, 0)
   return formatValue(total, format)
 }
+function fmtAggregate(rows, field, aggregate, format) {
+  var values = (rows || []).map(function (row) { return numberOf(valueOf(row, field)) })
+  var value = 0
+  if (aggregate === 'count') value = (rows || []).length
+  else if (aggregate === 'avg') value = values.length ? values.reduce(function (sum, item) { return sum + item }, 0) / values.length : 0
+  else if (aggregate === 'min') value = values.length ? Math.min.apply(null, values) : 0
+  else if (aggregate === 'max') value = values.length ? Math.max.apply(null, values) : 0
+  else value = values.reduce(function (sum, item) { return sum + item }, 0)
+  return formatValue(value, format)
+}
+function matches(field, operator, expected, row) {
+  var actual = valueOf(row, field)
+  if (operator === 'empty') return actual === null || actual === undefined || actual === ''
+  if (operator === 'contains') return String(actual || '').toLowerCase().indexOf(String(expected || '').toLowerCase()) >= 0
+  if (operator === 'eq') return String(actual) === String(expected)
+  if (operator === 'ne') return String(actual) !== String(expected)
+  var left = numberOf(actual), right = numberOf(expected)
+  if (operator === 'gt') return left > right
+  if (operator === 'gte') return left >= right
+  if (operator === 'lt') return left < right
+  if (operator === 'lte') return left <= right
+  return false
+}
 function fmtSumCalc(rows, expression, format) {
   var total = (rows || []).reduce(function (sum, row) { return sum + numberOf(evalExpression(expression, row)) }, 0)
   return formatValue(total, format)
 }
 """
+
+
+def sales_report_chrome_options(report: dict) -> dict:
+    page = (report.get("layout_schema") or {}).get("page") or {}
+    options = {"printBackground": True, "format": page.get("size") or "A4", "landscape": page.get("orientation") == "landscape"}
+    if page.get("page_numbers", True):
+        options.update({"displayHeaderFooter": True, "headerTemplate": "<span></span>", "footerTemplate": '<div style="width:100%;font-size:9px;color:#64748b;text-align:center"><span class="pageNumber"></span> / <span class="totalPages"></span></div>'})
+    return options
 
 
 def render_sales_order_pdf(db: Session, order: SalesOrder) -> tuple[bytes, str]:
@@ -2526,7 +2558,7 @@ def sales_screen_report(db: Session, report_id: int, target_screen: str) -> dict
             """
             SELECT id, code, name, COALESCE(menu_label, name) AS menu_label,
                    template_body, output_format, data_sql, source_mode, target_screen,
-                   COALESCE(print_scope, 'list') AS print_scope
+                   COALESCE(print_scope, 'list') AS print_scope, layout_schema
             FROM control_report_definitions
             WHERE id = :report_id
               AND active = TRUE
@@ -2551,14 +2583,35 @@ def render_sales_order_report(db: Session, order: SalesOrder, report: dict) -> t
         "helpers": SALES_REPORT_JSREPORT_HELPERS,
     }
     if output_format == "pdf":
-        template["chrome"] = {"printBackground": True, "format": "A4"}
+        template["chrome"] = sales_report_chrome_options(report)
     return jsreport_request(
         "/api/report",
         {"template": template, "data": sales_order_report_data(db, order)},
     )
 
 
-def sales_report_query_data(db: Session, report: dict) -> dict:
+def sales_report_parameters(report: dict, supplied: dict | None = None) -> dict:
+    definitions = (report.get("layout_schema") or {}).get("parameters") or []
+    supplied = supplied or {}
+    values = {}
+    for definition in definitions:
+        name = str(definition.get("name") or "").strip()
+        if not name or not re.fullmatch(r"[a-zA-Z_][a-zA-Z0-9_]*", name):
+            continue
+        value = supplied.get(name, definition.get("default"))
+        if definition.get("required") and (value is None or str(value).strip() == ""):
+            raise HTTPException(status_code=400, detail=f"Informe o parametro {definition.get('label') or name}.")
+        if value == "":
+            value = None
+        if value is not None and definition.get("type") == "number":
+            value = Decimal(str(value).replace(",", "."))
+        if value is not None and definition.get("type") == "boolean":
+            value = str(value).lower() in {"true", "1", "sim", "yes"}
+        values[name] = value
+    return values
+
+
+def sales_report_query_data(db: Session, report: dict, parameters: dict | None = None) -> dict:
     query = str(report.get("data_sql") or "").strip().rstrip(";")
     lowered = query.lower()
     forbidden = (" insert ", " update ", " delete ", " drop ", " alter ", " create ", " truncate ", " grant ", " revoke ", " call ", " execute ")
@@ -2566,7 +2619,8 @@ def sales_report_query_data(db: Session, report: dict) -> dict:
         raise HTTPException(status_code=400, detail="O relatorio nao possui uma SQL de leitura valida.")
     if ";" in query or any(token in f" {lowered} " for token in forbidden):
         raise HTTPException(status_code=400, detail="A SQL do relatorio deve conter apenas consulta de leitura.")
-    result = db.execute(text(f"SELECT * FROM ({query}) AS easysales_report LIMIT 5000"))
+    values = sales_report_parameters(report, parameters)
+    result = db.execute(text(f"SELECT * FROM ({query}) AS easysales_report LIMIT 5000"), values)
     columns = list(result.keys())
     rows = [dict(row) for row in result.mappings().all()]
     return {
@@ -2574,10 +2628,11 @@ def sales_report_query_data(db: Session, report: dict) -> dict:
         "generated_at": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "columns": columns,
         "rows": rows,
+        "parameters": values,
     }
 
 
-def render_sales_list_report(db: Session, report: dict) -> tuple[bytes, str]:
+def render_sales_list_report(db: Session, report: dict, parameters: dict | None = None) -> tuple[bytes, str]:
     output_format = report.get("output_format") or "pdf"
     recipe = "chrome-pdf" if output_format == "pdf" else "html"
     template = {
@@ -2587,10 +2642,10 @@ def render_sales_list_report(db: Session, report: dict) -> tuple[bytes, str]:
         "helpers": SALES_REPORT_JSREPORT_HELPERS,
     }
     if output_format == "pdf":
-        template["chrome"] = {"printBackground": True, "format": "A4"}
+        template["chrome"] = sales_report_chrome_options(report)
     return jsreport_request(
         "/api/report",
-        {"template": template, "data": sales_report_query_data(db, report)},
+        {"template": template, "data": sales_report_query_data(db, report, parameters)},
         timeout=120,
     )
 
@@ -5239,6 +5294,7 @@ def sales_reports_menu(db: Session = Depends(get_db)):
                 r.output_format,
                 r.ordinal,
                 r.show_in_menu,
+                r.layout_schema -> 'parameters' AS parameters,
                 e.display_name AS entity_name,
                 b.name AS browser_name
             FROM control_report_definitions r
@@ -5271,6 +5327,7 @@ def available_sales_reports(db: Session = Depends(get_db)):
                 r.output_format,
                 r.ordinal,
                 r.show_in_menu,
+                r.layout_schema -> 'parameters' AS parameters,
                 e.display_name AS entity_name,
                 b.name AS browser_name
             FROM control_report_definitions r
@@ -5298,6 +5355,16 @@ def print_sales_list_report(report_id: int, target_screen: str, db: Session = De
         media_type=content_type or ("application/pdf" if extension == "pdf" else "text/html"),
         headers={"Content-Disposition": f'inline; filename="{filename}"'},
     )
+
+
+@app.post("/reports/{report_id}/print", tags=["Relatorios"])
+def print_sales_list_report_with_parameters(report_id: int, target_screen: str, payload: dict, db: Session = Depends(get_db)):
+    report = sales_screen_report(db, report_id, target_screen)
+    if report.get("print_scope") != "list":
+        raise HTTPException(status_code=400, detail="Este relatorio foi configurado para impressao individual.")
+    content, content_type = render_sales_list_report(db, report, payload.get("parameters") or {})
+    extension = "pdf" if (report.get("output_format") or "pdf") == "pdf" else "html"
+    return Response(content=content, media_type=content_type or ("application/pdf" if extension == "pdf" else "text/html"), headers={"Content-Disposition": f'inline; filename="{report["code"]}.{extension}"'})
 
 
 @app.get("/orders/{order_id}/print", tags=["Pedidos"])
