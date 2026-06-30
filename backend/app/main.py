@@ -12,6 +12,8 @@ from urllib.request import Request as UrlRequest, urlopen
 
 from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_swagger_ui_html
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import JSONResponse, Response
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -22,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.config import get_settings
 from app.database import Base, SessionLocal, engine, get_db
 from app.license import router as license_router
+from app.integrations.router import router as catalog_integration_router
 from app.providers.gemini_order_assistant import GeminiOrderAssistantProvider
 from app.services.order_assistant_context import (
     ASSISTANT_BOOT_MENU,
@@ -174,11 +177,11 @@ SALES_ROUTE_PERMISSIONS = [
     ("sales_representatives", ("/sales-representatives", "/users/options")),
     ("sales_customer_management", ("/customer-monitoring",)),
     ("sales_customer_profiles", ("/customer-profiles",)),
-    ("sales_customers", ("/customers",)),
-    ("sales_price_tables", ("/price-tables", "/price-preview")),
+    ("sales_customers", ("/customers", "/integrations/catalog/customers")),
+    ("sales_price_tables", ("/price-tables", "/price-preview", "/integrations/catalog/price-tables")),
     ("sales_product_groups", ("/product-groups",)),
     ("sales_product_classes", ("/product-classes",)),
-    ("sales_products", ("/products", "/warehouses", "/stock-balances", "/stock-movements")),
+    ("sales_products", ("/products", "/warehouses", "/stock-balances", "/stock-movements", "/integrations/catalog/products")),
     ("sales_approvals", ("/orders/pending-approval", "/orders/approve", "/orders/reject")),
     ("sales_orders", ("/orders",)),
 ]
@@ -289,6 +292,10 @@ def route_permission(path: str, method: str) -> tuple[str, str] | None:
 app = FastAPI(
     title="EasySales API",
     version="0.1.0",
+    root_path="/api",
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
     description=(
         "Produto comercial separado, operando isolado ou integrado ao ecossistema Insights X. "
         "Quando integrado ao EasyFinance, compartilha clientes pela tabela people e mantem suas "
@@ -302,6 +309,7 @@ app = FastAPI(
         {"name": "Perfis comerciais", "description": "Classificacao configuravel do cliente e regras de aprovacao financeira."},
         {"name": "Produtos", "description": "Catalogo comercial com preco de compra, custo e preco de referencia."},
         {"name": "Tabelas de preco", "description": "Cabecalho e itens de preco por produto, com correcao por dentro ou por fora."},
+        {"name": "Integracao de Catalogo", "description": "Importacao e exportacao idempotente para ERPs e sistemas externos."},
         {"name": "Pedidos", "description": "Cabecalho e itens de pedido, com preco corrigido e rentabilidade."},
     ],
 )
@@ -316,6 +324,48 @@ app.add_middleware(
 )
 
 app.include_router(license_router)
+app.include_router(catalog_integration_router)
+
+
+_external_openapi_schema = None
+
+
+def external_openapi_schema() -> dict:
+    global _external_openapi_schema
+    if _external_openapi_schema is None:
+        external_routes = [
+            route
+            for route in app.routes
+            if route.path.startswith("/integrations/catalog")
+        ]
+        _external_openapi_schema = get_openapi(
+            title="EasySales External Integration API",
+            version="1.0.0",
+            description=(
+                "API externa para receber clientes, produtos e tabelas de preco, "
+                "e para exportar o catalogo de produtos. APIs internas do EasySales nao fazem parte deste contrato."
+            ),
+            routes=external_routes,
+            tags=[{
+                "name": "Integracao de Catalogo",
+                "description": "Operacoes idempotentes para ERPs e outros sistemas externos.",
+            }],
+            servers=[{"url": "/api", "description": "EasySales"}],
+        )
+    return _external_openapi_schema
+
+
+@app.get("/openapi.json", include_in_schema=False)
+def external_openapi_document():
+    return JSONResponse(external_openapi_schema())
+
+
+@app.get("/docs", include_in_schema=False)
+def external_swagger_documentation():
+    return get_swagger_ui_html(
+        openapi_url="/api/openapi.json",
+        title="EasySales External Integration API - Swagger",
+    )
 
 
 @app.middleware("http")
