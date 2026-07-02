@@ -9,6 +9,9 @@ BACKEND_DIR = Path(__file__).resolve().parents[1]
 
 
 class Settings(BaseSettings):
+    app_version: str = Field("0.1.0-beta.4", alias="APP_VERSION")
+    release_channel: str = Field("pilot", alias="RELEASE_CHANNEL")
+    build_sha: str = Field("development", alias="BUILD_SHA")
     database_url: str = Field(
         "postgresql+psycopg2://easyfinance:easyfinance@localhost:5433/easyfinance",
         alias="DATABASE_URL",
@@ -16,6 +19,7 @@ class Settings(BaseSettings):
     frontend_origin: str = Field("http://127.0.0.1:5190", alias="FRONTEND_ORIGIN")
     customer_provider: str = Field("easyfinance", alias="CUSTOMER_PROVIDER")
     jwt_secret: str = Field("change-me-in-production", alias="JWT_SECRET")
+    app_encryption_key: str = Field("change-me-app-encryption", alias="APP_ENCRYPTION_KEY")
     access_token_expire_minutes: int = Field(480, alias="ACCESS_TOKEN_EXPIRE_MINUTES")
     license_control_url: str | None = Field(None, alias="LICENSE_CONTROL_URL")
     license_tenant_id: str | None = Field(None, alias="LICENSE_TENANT_ID")

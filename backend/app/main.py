@@ -26,6 +26,7 @@ from app.database import Base, SessionLocal, engine, get_db
 from app.license import router as license_router
 from app.integrations.router import router as catalog_integration_router
 from app.providers.gemini_order_assistant import GeminiOrderAssistantProvider
+from app.security import decrypt_secret
 from app.services.order_assistant_context import (
     ASSISTANT_BOOT_MENU,
     ASSISTANT_CANCEL_COMMANDS,
@@ -168,7 +169,7 @@ HOME_WIDGET_SCOPES = {
 }
 DEFAULT_HOME_WIDGETS = list(HOME_WIDGET_SCOPES)
 
-PUBLIC_PATHS = {"/health", "/auth/login", "/assistant/whatsapp/messages", "/license/local-status", "/license/sync"}
+PUBLIC_PATHS = {"/health", "/version", "/auth/login", "/assistant/whatsapp/messages", "/license/local-status", "/license/sync"}
 
 SALES_ROUTE_PERMISSIONS = [
     ("sales_browser_definitions", ("/control/browser-definitions",)),
@@ -291,7 +292,7 @@ def route_permission(path: str, method: str) -> tuple[str, str] | None:
 
 app = FastAPI(
     title="EasySales API",
-    version="0.1.0",
+    version=settings.app_version,
     root_path="/api",
     docs_url=None,
     redoc_url=None,
@@ -934,7 +935,9 @@ def order_assistant_settings(db: Session, company_id: int) -> dict:
     }
     if not item:
         return defaults
-    return {**defaults, **(item.settings or {}), "enabled": bool(item.active)}
+    values = {**defaults, **(item.settings or {}), "enabled": bool(item.active)}
+    values["api_key"] = decrypt_secret(values.get("api_key"))
+    return values
 
 
 def representative_customers_for_assistant(db: Session, representative: SalesRepresentative) -> list[dict]:
@@ -2892,7 +2895,23 @@ def save_home_preferences(payload: HomePreferencesUpdate, request: Request, db: 
 
 @app.get("/health", tags=["Sistema"])
 def health():
-    return {"ok": True, "service": "easysales", "customer_provider": settings.customer_provider}
+    return {
+        "ok": True,
+        "service": "easysales",
+        "version": settings.app_version,
+        "customer_provider": settings.customer_provider,
+    }
+
+
+@app.get("/version", tags=["Sistema"])
+def version():
+    return {
+        "product": "easysales",
+        "version": settings.app_version,
+        "channel": settings.release_channel,
+        "build_sha": settings.build_sha,
+        "schema_version": "legacy-1",
+    }
 
 
 @app.get("/companies", response_model=list[CompanyRead], tags=["Sistema"])

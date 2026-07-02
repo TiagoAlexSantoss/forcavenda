@@ -1,7 +1,16 @@
 FROM python:3.11-slim
 
+ARG APP_VERSION=0.1.0-beta.2
+ARG BUILD_SHA=development
+
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+ENV APP_VERSION=$APP_VERSION
+ENV BUILD_SHA=$BUILD_SHA
+
+LABEL org.opencontainers.image.title="EasySales Backend" \
+      org.opencontainers.image.version=$APP_VERSION \
+      org.opencontainers.image.revision=$BUILD_SHA
 
 WORKDIR /app
 
